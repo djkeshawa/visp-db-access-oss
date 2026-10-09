@@ -533,3 +533,62 @@ test('connection endpoint edits require password before saving or testing', asyn
     page.getByRole('button', { name: 'Test connection' }),
   ).toBeEnabled();
 });
+test('console suggests optimizations and applies fixes without flicker', async ({
+  page,
+}) => {
+  // Navigate in-app: a full page load resets the mock session.
+  await page.getByRole('link', { name: 'Run a first query' }).click();
+  const editor = page.getByRole('textbox', { name: 'SQL editor' });
+  const panel = page.getByRole('region', { name: 'SQL safety analysis' });
+  const hints = panel.getByLabel('Optimization suggestions');
+  await editor.fill('SELECT * FROM users');
+  await expect(
+    hints.getByRole('button', { name: 'List columns' }),
+  ).toBeEnabled();
+  await expect(
+    hints.getByRole('button', { name: 'Add LIMIT 100' }),
+  ).toBeVisible();
+
+  await hints.getByRole('button', { name: 'List columns' }).click();
+  await expect(editor).toHaveText(
+    'SELECT id, name, email, created_at FROM users',
+  );
+  await expect(
+    hints.getByRole('button', { name: 'List columns' }),
+  ).toBeHidden();
+
+  // While re-analyzing, the previous verdict stays on screen instead of "Analyzing…".
+  const seen = await page.evaluate(() => {
+    const labels = new Set<string>();
+    const observer = new MutationObserver(() =>
+      labels.add(
+        document.querySelector('.safety-panel .verdict strong')?.textContent ??
+          '',
+      ),
+    );
+    observer.observe(document.querySelector('.safety-panel')!, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+    });
+    (window as unknown as { __stop: () => string[] }).__stop = () => {
+      observer.disconnect();
+      return [...labels];
+    };
+    return true;
+  });
+  expect(seen).toBe(true);
+  await editor.press('End');
+  await editor.pressSequentially(" WHERE email LIKE '%@visp.dev'", {
+    delay: 20,
+  });
+  await expect(hints).toContainText('LIKE pattern that starts with %');
+  const labels = await page.evaluate(() =>
+    (window as unknown as { __stop: () => string[] }).__stop(),
+  );
+  expect(labels).not.toContain('Analyzing…');
+
+  await editor.fill('DELETE FROM users');
+  await expect(panel.getByText('Blocked', { exact: true })).toBeVisible();
+  await expect(hints).toBeHidden();
+});
