@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import type { Cluster, Policy } from '../../api/types';
 import { useAction, useResource } from '../../lib/query';
 import {
@@ -15,18 +15,16 @@ import {
   millisecondsFromSeconds,
   policySummary,
 } from '../../lib/policy';
+const same = (a: unknown, b: unknown) =>
+  JSON.stringify(a) === JSON.stringify(b);
 export function PolicyPage({ cluster }: { cluster: Cluster }) {
   const query = useResource<Policy>(`/clusters/${cluster.id}/policy`);
   return query.isPending ? (
     <Skeleton />
   ) : query.error ? (
-    <ErrorPanel error={query.error} />
+    <ErrorPanel error={query.error} retry={() => void query.refetch()} />
   ) : (
-    <PolicyForm
-      key={JSON.stringify(query.data)}
-      cluster={cluster}
-      original={query.data}
-    />
+    <PolicyForm cluster={cluster} original={query.data} />
   );
 }
 function PolicyForm({
@@ -37,40 +35,65 @@ function PolicyForm({
   original: Policy;
 }) {
   const [draft, setDraft] = useState(original),
+    [baseline, setBaseline] = useState(original),
     [confirm, setConfirm] = useState(false);
+  // The server policy changed under us (save, or another administrator).
+  // Adopt it silently unless that would discard unsaved edits.
+  const serverChanged = !same(original, baseline);
+  if (serverChanged && (same(draft, baseline) || same(draft, original))) {
+    setBaseline(original);
+    setDraft(original);
+  }
+  const stale =
+    serverChanged && !same(draft, baseline) && !same(draft, original);
   const save = useAction('Safety policy saved'),
     admin = cluster.my_access === 'admin';
   const defaults = environmentPolicy(cluster.environment);
   const update = (values: Partial<Policy>) =>
     setDraft((draft) => ({ ...draft, ...values }));
-  const diff = (Object.keys(original) as (keyof Policy)[]).filter(
-    (key) => JSON.stringify(original[key]) !== JSON.stringify(draft[key]),
+  const diff = useMemo(
+    () =>
+      (Object.keys(baseline) as (keyof Policy)[]).filter(
+        (key) => !same(baseline[key], draft[key]),
+      ),
+    [baseline, draft],
   );
+  const customized = (
+    key: keyof Policy,
+    buttonText: string,
+    ariaLabel?: string,
+  ) =>
+    !same(draft[key], defaults[key]) && (
+      <div className="policy-reset">
+        <span>Customized</span>
+        {admin && (
+          <Button
+            variant="ghost"
+            size="small"
+            aria-label={ariaLabel}
+            onClick={() => update({ [key]: defaults[key] })}
+          >
+            {buttonText}
+          </Button>
+        )}
+      </div>
+    );
   const row = (
     key: keyof Policy,
     label: string,
     help: string,
     control: ReactNode,
+    labelFor?: string,
   ) => (
     <div key={key} className="policy-row">
       <div>
-        <label htmlFor={`policy-${key}`}>{label}</label>
-        <small>{help}</small>
-        {JSON.stringify(draft[key]) !== JSON.stringify(defaults[key]) && (
-          <div className="policy-reset">
-            <span>Customized</span>
-            {admin && (
-              <Button
-                variant="ghost"
-                size="small"
-                aria-label={`Reset ${label} to default`}
-                onClick={() => update({ [key]: defaults[key] })}
-              >
-                Reset to default
-              </Button>
-            )}
-          </div>
+        {labelFor ? (
+          <label htmlFor={labelFor}>{label}</label>
+        ) : (
+          <span>{label}</span>
         )}
+        <small>{help}</small>
+        {customized(key, 'Reset to default', `Reset ${label} to default`)}
       </div>
       <div className="policy-control">{control}</div>
     </div>
@@ -123,6 +146,7 @@ function PolicyForm({
         />
         <span>{unit}</span>
       </>,
+      `policy-${key}`,
     );
   };
   const toggle = (key: keyof Policy, label: string, help: string) =>
@@ -150,20 +174,7 @@ function PolicyForm({
         validate={key === 'allowed_cidrs' ? isCidr : undefined}
         help={help}
       />
-      {JSON.stringify(draft[key]) !== JSON.stringify(defaults[key]) && (
-        <div className="policy-reset">
-          <span>Customized</span>
-          {admin && (
-            <Button
-              size="small"
-              variant="ghost"
-              onClick={() => update({ [key]: defaults[key] })}
-            >
-              Reset {label.toLowerCase()} to default
-            </Button>
-          )}
-        </div>
-      )}
+      {customized(key, `Reset ${label.toLowerCase()} to default`)}
     </div>
   );
   const invalid =
@@ -191,6 +202,23 @@ function PolicyForm({
         )}
       </div>
       <p className="policy-summary">{policySummary(draft)}</p>
+      {stale && (
+        <div className="callout warning" role="status">
+          <span>
+            This policy was changed elsewhere. Saving will overwrite those
+            changes.
+          </span>
+          <Button
+            size="small"
+            onClick={() => {
+              setBaseline(original);
+              setDraft(original);
+            }}
+          >
+            Load latest policy
+          </Button>
+        </div>
+      )}
       {!admin && (
         <p className="muted">You have read-only access to this policy.</p>
       )}
@@ -296,7 +324,7 @@ function PolicyForm({
             {invalid ? ' · Check limits and CIDRs' : ''}
           </span>
           <div className="inline">
-            <Button onClick={() => setDraft(original)}>Discard changes</Button>
+            <Button onClick={() => setDraft(baseline)}>Discard changes</Button>
             <Button
               variant="primary"
               disabled={invalid}
@@ -332,7 +360,7 @@ function PolicyForm({
           {diff.map((key) => (
             <div key={key}>
               <strong>{key.replaceAll('_', ' ')}</strong>
-              <del>{displayPolicyValue(key, original[key])}</del>
+              <del>{displayPolicyValue(key, baseline[key])}</del>
               <ins>{displayPolicyValue(key, draft[key])}</ins>
             </div>
           ))}

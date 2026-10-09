@@ -1,5 +1,5 @@
 import { useSearchParams } from 'react-router-dom';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { User } from '../../api/types';
 import { useAction, useResource } from '../../lib/query';
 import {
@@ -26,10 +26,14 @@ export function UsersPage() {
     ),
     [disable, setDisable] = useState<User | null>(null),
     [search, setSearch] = useState('');
-  const filtered =
-    query.data?.items.filter((user) =>
-      `${user.name} ${user.email}`.toLowerCase().includes(search.toLowerCase()),
-    ) ?? [];
+  const filtered = useMemo(() => {
+    const needle = search.toLowerCase();
+    return (
+      query.data?.items.filter((user) =>
+        `${user.name} ${user.email}`.toLowerCase().includes(needle),
+      ) ?? []
+    );
+  }, [query.data, search]);
   const remove = useAction('User disabled and sessions revoked');
   return (
     <>
@@ -82,46 +86,40 @@ export function UsersPage() {
               </tr>
             </thead>
             <tbody>
-              {query.data.items
-                .filter((user) =>
-                  `${user.name} ${user.email}`
-                    .toLowerCase()
-                    .includes(search.toLowerCase()),
-                )
-                .map((user) => (
-                  <tr key={user.id}>
-                    <td>
-                      <strong>{user.name}</strong>
-                      <small>{user.email}</small>
-                    </td>
-                    <td>
-                      <Badge>{user.org_role}</Badge>
-                    </td>
-                    <td>
-                      <Badge tone={user.disabled ? 'neutral' : 'success'}>
-                        {user.disabled ? 'Disabled' : 'Active'}
-                      </Badge>
-                    </td>
-                    <td>{formatTime(user.last_login_at)}</td>
-                    <td>{formatTime(user.created_at)}</td>
-                    <td>
-                      <RowMenu
-                        label={`Actions for ${user.name}`}
-                        items={[
-                          { label: 'Edit', onSelect: () => setEditing(user) },
-                          ...(!user.disabled && user.id !== current?.id
-                            ? [
-                                {
-                                  label: 'Disable',
-                                  onSelect: () => setDisable(user),
-                                },
-                              ]
-                            : []),
-                        ]}
-                      />
-                    </td>
-                  </tr>
-                ))}
+              {filtered.map((user) => (
+                <tr key={user.id}>
+                  <td>
+                    <strong>{user.name}</strong>
+                    <small>{user.email}</small>
+                  </td>
+                  <td>
+                    <Badge>{user.org_role}</Badge>
+                  </td>
+                  <td>
+                    <Badge tone={user.disabled ? 'neutral' : 'success'}>
+                      {user.disabled ? 'Disabled' : 'Active'}
+                    </Badge>
+                  </td>
+                  <td>{formatTime(user.last_login_at)}</td>
+                  <td>{formatTime(user.created_at)}</td>
+                  <td>
+                    <RowMenu
+                      label={`Actions for ${user.name}`}
+                      items={[
+                        { label: 'Edit', onSelect: () => setEditing(user) },
+                        ...(!user.disabled && user.id !== current?.id
+                          ? [
+                              {
+                                label: 'Disable',
+                                onSelect: () => setDisable(user),
+                              },
+                            ]
+                          : []),
+                      ]}
+                    />
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
@@ -168,6 +166,7 @@ function UserForm({ user, close }: { user?: User; close: () => void }) {
     <form
       onSubmit={(event) => {
         event.preventDefault();
+        if (save.isPending) return;
         const values = Object.fromEntries(new FormData(event.currentTarget));
         const { password, ...fields } = values;
         save.mutate(

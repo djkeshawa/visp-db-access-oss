@@ -1,6 +1,8 @@
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -18,6 +20,7 @@ import { useSearchParams } from 'react-router-dom';
 import type {
   Analysis,
   Cluster,
+  Fix,
   QueryResult,
   SchemaTree,
   Approval,
@@ -54,6 +57,7 @@ import {
   type QueryTab,
 } from '../../lib/workspace';
 import { useUser } from '../auth/session';
+import { withClientFixes } from '../../lib/optimize';
 const newTab = (index: number, engine = 'postgres'): QueryTab => {
   const sql = `SELECT id, name, email\nFROM ${engine === 'postgres' ? 'public.users' : 'users'}\nORDER BY created_at DESC;`;
   return {
@@ -63,6 +67,11 @@ const newTab = (index: number, engine = 'postgres'): QueryTab => {
     savedSql: sql,
   };
 };
+const importedTab = (index: number, engine: string, sql: string): QueryTab => ({
+  ...newTab(index, engine),
+  sql,
+  savedSql: sql,
+});
 function loadTabs(key: string, engine: string): QueryTab[] {
   try {
     const tabs = loadDrafts(localStorage.getItem(key));
@@ -131,22 +140,26 @@ export function ConsoleWorkspace({
   const user = useUser();
   const policy = useResource<Policy>(`/clusters/${cluster.id}/policy`);
   const storageKey = `vda.tabs.${user?.id ?? 'anonymous'}.${cluster.id}`;
-  const [tabs, setTabs] = useState(() => {
-      const loaded = loadTabs(storageKey, cluster.engine);
-      if (initialSql)
-        loaded.push({
-          ...newTab(loaded.length + 1, cluster.engine),
-          sql: initialSql,
-        });
-      return loaded;
-    }),
-    [active, setActive] = useState(() => {
-      try {
-        return localStorage.getItem(`${storageKey}.active`) ?? '';
-      } catch {
-        return '';
-      }
-    }),
+  const [boot] = useState(() => {
+    const loaded = loadTabs(storageKey, cluster.engine);
+    let activeId = '';
+    try {
+      activeId = localStorage.getItem(`${storageKey}.active`) ?? '';
+    } catch {
+      // Storage can be unavailable; fall back to the first tab.
+    }
+    if (initialSql) {
+      // Reuse an identical draft instead of appending a duplicate on remount.
+      const tab =
+        loaded.find((item) => item.sql === initialSql) ??
+        importedTab(loaded.length + 1, cluster.engine, initialSql);
+      if (!loaded.includes(tab)) loaded.push(tab);
+      activeId = tab.id;
+    }
+    return { tabs: loaded, active: activeId };
+  });
+  const [tabs, setTabs] = useState(boot.tabs),
+    [active, setActive] = useState(boot.active),
     [rename, setRename] = useState(false),
     [closeConfirm, setCloseConfirm] = useState<'one' | 'others' | null>(null),
     [editorHeight, setEditorHeight] = useState(() =>
@@ -175,18 +188,18 @@ export function ConsoleWorkspace({
     return () => observer.disconnect();
   }, []);
   const found = tabs.findIndex((tab) => tab.id === active);
-  const index = found >= 0 ? found : initialSql ? tabs.length - 1 : 0;
-  const current = tabs[index] ?? newTab(1);
+  const index = found >= 0 ? found : 0;
+  const current = tabs[index] ?? newTab(1, cluster.engine);
   const sql = current.sql;
+  const currentId = useRef(current.id);
+  useLayoutEffect(() => {
+    currentId.current = current.id;
+  }, [current.id]);
   const importedSql = useRef(initialSql);
   useEffect(() => {
     if (initialSql && importedSql.current !== initialSql) {
       importedSql.current = initialSql;
-      const tab = {
-        ...newTab(tabs.length + 1, cluster.engine),
-        sql: initialSql,
-        savedSql: initialSql,
-      };
+      const tab = importedTab(tabs.length + 1, cluster.engine, initialSql);
       setTabs((tabs) => [...tabs, tab]);
       setActive(tab.id);
       setResult(undefined);
@@ -201,30 +214,56 @@ export function ConsoleWorkspace({
   const cancel = useAction('Cancellation requested'),
     approval = useAction<Approval>('Approval requested');
   const schema = useResource<SchemaTree>(`/clusters/${cluster.id}/schema`);
+  // Leading/trailing whitespace never changes the verdict, so it neither
+  // restarts the debounce nor triggers another round trip.
+  const analyzed = debounced.trim();
   useEffect(() => {
-    const timer = setTimeout(() => setDebounced(sql), 400);
+    if (sql.trim() === analyzed) return;
+    const timer = setTimeout(() => setDebounced(sql), 250);
     return () => clearTimeout(timer);
-  }, [sql]);
+  }, [sql, analyzed]);
+  // Persisting every keystroke serializes all tabs; batch writes instead and
+  // flush when the page is hidden or the console unmounts.
+  const persist = useRef<() => void>(() => undefined);
   useEffect(() => {
-    try {
-      localStorage.setItem(storageKey, JSON.stringify(tabs));
-      localStorage.setItem(`${storageKey}.active`, current.id);
-    } catch {
-      toast('Drafts could not be saved in this browser.', 'error');
-    }
+    persist.current = () => {
+      try {
+        localStorage.setItem(storageKey, JSON.stringify(tabs));
+        localStorage.setItem(`${storageKey}.active`, current.id);
+      } catch {
+        toast('Drafts could not be saved in this browser.', 'error');
+      }
+      persist.current = () => undefined;
+    };
+    const timer = setTimeout(() => persist.current(), 500);
+    return () => clearTimeout(timer);
   }, [tabs, storageKey, toast, current.id]);
+  useEffect(() => {
+    const flush = () => persist.current();
+    window.addEventListener('pagehide', flush);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      flush();
+    };
+  }, []);
   const analysis = useQuery({
-    queryKey: ['analysis', cluster.id, debounced],
+    queryKey: ['analysis', cluster.id, analyzed],
     queryFn: ({ signal }) =>
       request<Analysis>(`/clusters/${cluster.id}/analyze`, {
-        ...json('POST', { sql: debounced }),
+        ...json('POST', { sql: analyzed }),
         signal,
       }),
-    enabled: !!debounced.trim(),
-    staleTime: 0,
+    enabled: !!analyzed,
+    // Revisiting recent text (undo, tab switch) reuses its analysis; the
+    // server re-analyzes on every run, so a briefly stale panel is safe.
+    staleTime: 15_000,
+    // Keep the previous verdict visible while the next one loads, but never
+    // across clusters.
+    placeholderData: (previous, query) =>
+      query?.queryKey[1] === cluster.id ? previous : undefined,
   });
   const running = useMutation({
-    mutationFn: ({ sql, id }: { sql: string; id: string }) =>
+    mutationFn: ({ sql, id }: { sql: string; id: string; tabId: string }) =>
       request<QueryResult>(
         `/clusters/${cluster.id}/query`,
         json('POST', { sql, query_id: id }),
@@ -233,7 +272,9 @@ export function ConsoleWorkspace({
       setResult(value);
       setTabs((tabs) =>
         tabs.map((tab) =>
-          tab.id === current.id ? { ...tab, savedSql: variables.sql } : tab,
+          tab.id === variables.tabId
+            ? { ...tab, savedSql: variables.sql }
+            : tab,
         ),
       );
     },
@@ -244,22 +285,22 @@ export function ConsoleWorkspace({
     },
   });
   const analysisFresh =
-    sql === debounced &&
+    sql.trim() === analyzed &&
     !analysis.isFetching &&
+    !analysis.isPlaceholderData &&
     !!analysis.data &&
     !analysis.error;
+  const verdict = analysis.data?.verdict;
+  const needsApproval = verdict === 'requires_approval';
+  const canRun =
+    !running.isPending &&
+    analysisFresh &&
+    verdict !== 'deny' &&
+    !!sql.trim() &&
+    !(needsApproval && cluster.my_access === 'read');
   const run = () => {
-    if (
-      running.isPending ||
-      queryId.current ||
-      (analysis.data?.verdict === 'requires_approval' &&
-        cluster.my_access === 'read') ||
-      !analysisFresh ||
-      analysis.data?.verdict === 'deny' ||
-      !sql.trim()
-    )
-      return;
-    if (analysis.data?.verdict === 'requires_approval') {
+    if (!canRun || queryId.current) return;
+    if (needsApproval) {
       setReasonOpen(true);
       return;
     }
@@ -267,7 +308,7 @@ export function ConsoleWorkspace({
     queryId.current = id;
     setExecutionError(undefined);
     setResult(undefined);
-    running.mutate({ sql, id });
+    running.mutate({ sql, id, tabId: current.id });
   };
   const runRef = useRef(run),
     cancelRef = useRef(() => {
@@ -298,10 +339,33 @@ export function ConsoleWorkspace({
         );
     };
   }, []);
-  const updateSql = (value: string) =>
-    setTabs((tabs) =>
-      tabs.map((tab, i) => (i === index ? { ...tab, sql: value } : tab)),
-    );
+  // Stable and id-based so memoized children keep their props and an editor
+  // echo can never write into a different tab than the one it belongs to.
+  const updateSql = useCallback(
+    (value: string) =>
+      setTabs((tabs) =>
+        tabs.some((tab) => tab.id === currentId.current && tab.sql !== value)
+          ? tabs.map((tab) =>
+              tab.id === currentId.current ? { ...tab, sql: value } : tab,
+            )
+          : tabs,
+      ),
+    [],
+  );
+  const insertSql = useCallback(
+    (name: string) =>
+      setTabs((tabs) =>
+        tabs.map((tab) =>
+          tab.id === currentId.current
+            ? {
+                ...tab,
+                sql: `${tab.sql}${tab.sql.endsWith(' ') ? '' : ' '}${name}`,
+              }
+            : tab,
+        ),
+      ),
+    [],
+  );
   const addTab = () => {
     if (running.isPending) return;
     const tab = newTab(tabs.length + 1, cluster.engine);
@@ -327,8 +391,12 @@ export function ConsoleWorkspace({
     setExecutionError(undefined);
     setCloseConfirm(null);
   };
+  const addTabRef = useRef(addTab);
   useEffect(() => {
-    const add = () => addTab();
+    addTabRef.current = addTab;
+  });
+  useEffect(() => {
+    const add = () => addTabRef.current();
     const keyboard = (event: KeyboardEvent) => {
       if (
         (event.metaKey || event.ctrlKey) &&
@@ -336,7 +404,7 @@ export function ConsoleWorkspace({
         event.key.toLowerCase() === 't'
       ) {
         event.preventDefault();
-        addTab();
+        addTabRef.current();
       }
     };
     const reorder = (event: Event) => {
@@ -352,8 +420,35 @@ export function ConsoleWorkspace({
       window.removeEventListener('keydown', keyboard);
       window.removeEventListener('vda:reorder-tab', reorder);
     };
+  }, []);
+  const suggestions = useMemo(
+    () => withClientFixes(analyzed, analysis.data, schema.data, cluster.engine),
+    [analyzed, analysis.data, schema.data, cluster.engine],
+  );
+  const freshRef = useRef(analysisFresh);
+  useLayoutEffect(() => {
+    freshRef.current = analysisFresh;
   });
-  const needsApproval = analysis.data?.verdict === 'requires_approval';
+  const applyFix = useCallback(
+    (fix: Fix) => {
+      // A fix is computed from the analyzed text; never overwrite newer edits.
+      if (!freshRef.current) return;
+      if (fix.action === 'replace') {
+        updateSql(fix.sql);
+        return;
+      }
+      const tab = importedTab(tabs.length + 1, cluster.engine, fix.sql);
+      setTabs((tabs) => [...tabs, tab]);
+      setActive(tab.id);
+      setResult(undefined);
+    },
+    [updateSql, tabs.length, cluster.engine],
+  );
+  const refetchAnalysis = analysis.refetch;
+  const retryAnalysis = useCallback(
+    () => void refetchAnalysis(),
+    [refetchAnalysis],
+  );
   return (
     <div
       style={{ '--editor-height': `${editorHeight}px` } as CSSProperties}
@@ -368,9 +463,7 @@ export function ConsoleWorkspace({
               onClose={() => setSchemaOpen(false)}
               clusterId={cluster.id}
               engine={cluster.engine}
-              onInsert={(name) =>
-                updateSql(`${sql}${sql.endsWith(' ') ? '' : ' '}${name}`)
-              }
+              onInsert={insertSql}
               onQuery={updateSql}
             />
           </aside>
@@ -423,16 +516,10 @@ export function ConsoleWorkspace({
                 className={
                   needsApproval ? undefined : `run-${cluster.environment}`
                 }
-                disabled={
-                  running.isPending ||
-                  !analysisFresh ||
-                  analysis.data?.verdict === 'deny' ||
-                  !sql.trim() ||
-                  (needsApproval && cluster.my_access === 'read')
-                }
+                disabled={!canRun}
                 title={
-                  analysis.data?.verdict === 'deny'
-                    ? analysis.data.issues.find(
+                  verdict === 'deny'
+                    ? analysis.data?.issues.find(
                         (issue) => issue.severity === 'block',
                       )?.message
                     : undefined
@@ -488,11 +575,11 @@ export function ConsoleWorkspace({
                 clusterId={cluster.id}
                 sql={sql}
                 onRestore={(value) => {
-                  const tab = {
-                    ...newTab(tabs.length + 1, cluster.engine),
-                    sql: value,
-                    savedSql: value,
-                  };
+                  const tab = importedTab(
+                    tabs.length + 1,
+                    cluster.engine,
+                    value,
+                  );
                   setTabs((tabs) => [...tabs, tab]);
                   setActive(tab.id);
                   setResult(undefined);
@@ -531,7 +618,7 @@ export function ConsoleWorkspace({
               {!safetyOpen && (
                 <Button
                   variant="ghost"
-                  className={`compact-verdict ${analysis.data?.verdict === 'allow' ? 'success-text' : analysis.data?.verdict === 'deny' ? 'error-text' : 'warning-text'}`}
+                  className={`compact-verdict ${verdict === 'allow' ? 'success-text' : verdict === 'deny' ? 'error-text' : 'warning-text'}`}
                   aria-label="Open safety analysis"
                   onClick={() => setSafetyOpen(true)}
                 >
@@ -539,7 +626,7 @@ export function ConsoleWorkspace({
                     ? 'Analysis unavailable'
                     : !analysisFresh
                       ? 'Analyzing…'
-                      : analysis.data?.verdict === 'allow'
+                      : verdict === 'allow'
                         ? 'Safe to run'
                         : needsApproval
                           ? 'Needs approval'
@@ -591,10 +678,12 @@ export function ConsoleWorkspace({
             <SafetyPanel
               analysis={analysis.data}
               maxRows={policy.data?.max_rows}
-              pending={sql !== debounced || analysis.isFetching}
+              pending={sql.trim() !== analyzed || analysis.isFetching}
               error={analysis.error}
               clusterId={cluster.id}
-              retry={() => void analysis.refetch()}
+              retry={retryAnalysis}
+              suggestions={suggestions}
+              onApplyFix={applyFix}
             />
           </aside>
         )}

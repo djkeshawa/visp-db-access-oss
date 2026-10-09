@@ -4,6 +4,7 @@ use sqlparser::{
     dialect::{Dialect as ParserDialect, MySqlDialect},
     tokenizer::{Token, Tokenizer, TokenizerError},
 };
+use std::fmt::Write;
 
 #[derive(Debug)]
 pub(crate) struct Lexer {
@@ -96,19 +97,22 @@ pub(crate) fn escape_rendered(sql: &str) -> String {
     let Ok(tokens) = Tokenizer::new(&lexer, sql).with_unescape(false).tokenize() else {
         return sql.to_owned();
     };
-    tokens
-        .into_iter()
-        .map(|token| match token {
-            Token::SingleQuotedString(value) => {
-                Token::SingleQuotedString(value.replace('\\', "\\\\")).to_string()
+    let mut escaped = String::with_capacity(sql.len());
+    for token in tokens {
+        let token = match token {
+            Token::SingleQuotedString(value) if value.contains('\\') => {
+                Token::SingleQuotedString(value.replace('\\', "\\\\"))
             }
-            Token::DoubleQuotedString(value) => {
-                Token::DoubleQuotedString(value.replace('\\', "\\\\")).to_string()
+            Token::DoubleQuotedString(value) if value.contains('\\') => {
+                Token::DoubleQuotedString(value.replace('\\', "\\\\"))
             }
-            Token::NationalStringLiteral(value) => {
-                Token::NationalStringLiteral(value.replace('\\', "\\\\")).to_string()
+            Token::NationalStringLiteral(value) if value.contains('\\') => {
+                Token::NationalStringLiteral(value.replace('\\', "\\\\"))
             }
-            token => token.to_string(),
-        })
-        .collect()
+            token => token,
+        };
+        // Writing to a String cannot fail.
+        let _ = write!(escaped, "{token}");
+    }
+    escaped
 }

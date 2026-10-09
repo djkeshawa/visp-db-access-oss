@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowUpRight, CheckCheck, Clock3 } from 'lucide-react';
 import type { Approval, Cluster, HistoryEntry, Page } from '../../api/types';
@@ -14,6 +14,15 @@ import {
 } from '../../components/ui';
 import { RelativeTime, ExpiryTime } from '../../components/ui/time';
 import { HistoryTable } from '../history/history';
+/** Ticks every 30s so expired approvals drop off without waiting for a refetch. */
+function useMinuteClock() {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30000);
+    return () => clearInterval(timer);
+  }, []);
+  return now;
+}
 function RequestRow({ approval, mine }: { approval: Approval; mine: boolean }) {
   return (
     <Link className="needs-row" to={`/approvals?id=${approval.id}&tab=all`}>
@@ -41,22 +50,35 @@ export function NeedsYou({ unhealthy }: { unhealthy: Cluster[] }) {
     ),
     inbox = useResource<Page<Approval>>('/approvals?status=pending&limit=50'),
     clusters = useResource<{ items: Cluster[] }>('/clusters');
-  const waiting =
-    inbox.data?.items.filter(
-      (approval) =>
-        approval.requester.id !== user?.id &&
-        Date.parse(approval.expires_at) > Date.now() &&
-        clusters.data?.items.some(
-          (cluster) =>
-            cluster.id === approval.cluster_id && cluster.my_access === 'admin',
-        ),
-    ) ?? [];
-  const pending =
-    mine.data?.items.filter(
-      (approval) => Date.parse(approval.expires_at) > Date.now(),
-    ) ?? [];
-  const unhealthyTargets = unhealthy.filter((cluster) =>
-    ['down', 'degraded'].includes(cluster.health.status),
+  const now = useMinuteClock();
+  const waiting = useMemo(() => {
+    const adminClusters = new Set(
+      clusters.data?.items
+        .filter((cluster) => cluster.my_access === 'admin')
+        .map((cluster) => cluster.id),
+    );
+    return (
+      inbox.data?.items.filter(
+        (approval) =>
+          approval.requester.id !== user?.id &&
+          Date.parse(approval.expires_at) > now &&
+          adminClusters.has(approval.cluster_id),
+      ) ?? []
+    );
+  }, [inbox.data, clusters.data, user?.id, now]);
+  const pending = useMemo(
+    () =>
+      mine.data?.items.filter(
+        (approval) => Date.parse(approval.expires_at) > now,
+      ) ?? [],
+    [mine.data, now],
+  );
+  const unhealthyTargets = useMemo(
+    () =>
+      unhealthy.filter((cluster) =>
+        ['down', 'degraded'].includes(cluster.health.status),
+      ),
+    [unhealthy],
   );
   const error = mine.error ?? inbox.error ?? clusters.error;
   return (
@@ -116,6 +138,7 @@ export function MyWork() {
   const clusters = useResource<{ items: Cluster[] }>('/clusters');
   const history = useResource<Page<HistoryEntry>>(
     `/history?${everyone ? '' : `user_id=${user?.id}&`}limit=5`,
+    everyone || !!user?.id,
   );
   return (
     <section className="recent-queries">
@@ -133,7 +156,9 @@ export function MyWork() {
               ]}
             />
           )}
-          <Link to={everyone ? '/history' : `/history?user_id=${user?.id}`}>
+          <Link
+            to={everyone || !user ? '/history' : `/history?user_id=${user.id}`}
+          >
             View history
           </Link>
         </div>

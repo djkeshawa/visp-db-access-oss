@@ -67,14 +67,16 @@ pub async fn analyze(
     Input(body): Input<QueryInput>,
 ) -> Result<Json<Analysis>, ApiError> {
     validate_sql(&body.sql)?;
-    let c = rbac::require_level(&state.db, &user, db::id(&id)?, AccessLevel::Read).await?;
-    let policy = db::policy(&state.db, c.id).await?;
+    let cluster_id = db::id(&id)?;
+    let (access, policy) = tokio::join!(
+        rbac::require_level_effective(&state.db, &user, cluster_id, AccessLevel::Read),
+        db::policy(&state.db, cluster_id)
+    );
+    let (c, level) = access?;
+    let policy = policy?;
     if !crate::network::allowed(ip.0, &crate::network::parse_cidrs(&policy.allowed_cidrs)?) {
         return Err(ApiError::forbidden());
     }
-    let level = rbac::effective(&state.db, &user, &c)
-        .await?
-        .ok_or_else(ApiError::forbidden)?;
     let mut analysis = vda_guard::analyze(&body.sql, dialect(&c), level, &policy.guard());
     crate::masking::harden_analysis(
         &mut analysis,
@@ -141,14 +143,15 @@ async fn run_inner(
 ) -> Result<QueryResult, ApiError> {
     let (approved, timeout_ms) = approval;
     validate_sql(&body.sql)?;
-    let c = rbac::require_level(&state.db, user, cluster_id, AccessLevel::Read).await?;
-    let mut policy = db::policy(&state.db, c.id).await?;
+    let (access, policy) = tokio::join!(
+        rbac::require_level_effective(&state.db, user, cluster_id, AccessLevel::Read),
+        db::policy(&state.db, cluster_id)
+    );
+    let (c, level) = access?;
+    let mut policy = policy?;
     if !crate::network::allowed(ip, &crate::network::parse_cidrs(&policy.allowed_cidrs)?) {
         return Err(ApiError::forbidden());
     }
-    let level = rbac::effective(&state.db, user, &c)
-        .await?
-        .ok_or_else(ApiError::forbidden)?;
     if let Some(timeout_ms) = timeout_ms {
         policy.statement_timeout_ms = policy.statement_timeout_ms.min(timeout_ms);
         policy.lock_timeout_ms = policy.lock_timeout_ms.min(policy.statement_timeout_ms);
@@ -404,7 +407,7 @@ async fn pipeline(
     let tables = analysis
         .statements
         .iter()
-        .flat_map(|s| s.tables.clone())
+        .flat_map(|s| s.tables.iter().cloned())
         .collect::<Vec<_>>();
     let columns = crate::masking::apply(&mut result, &policy.masked_columns, &tables);
     Ok(QueryResult {

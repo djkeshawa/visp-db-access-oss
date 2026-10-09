@@ -396,8 +396,7 @@ textarea::placeholder {
   animation: refined-toast var(--motion-base) var(--ease-popover);
 }
 .skeleton,
-.badge.pulsing::before,
-.illustration-orbit {
+.badge.pulsing::before {
   animation: none;
 }
 .app {
@@ -718,9 +717,6 @@ td.numeric {
 .empty h2 {
   font-size: 14px;
   font-weight: 400;
-}
-.empty p {
-  display: none;
 }
 .empty > .button,
 .empty > a {

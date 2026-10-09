@@ -36,14 +36,27 @@ export function SetupChecklist() {
   )
     return <Skeleton />;
   const error = clusters.error ?? users.error ?? history.error ?? audit.error;
-  if (error) return <ErrorPanel error={error} />;
+  if (error)
+    return (
+      <ErrorPanel
+        error={error}
+        retry={() => {
+          void clusters.refetch();
+          void users.refetch();
+          void history.refetch();
+          void audit.refetch();
+        }}
+      />
+    );
+  const clusterIds = new Set(clusters.data?.items.map((c) => c.id));
   const complete = setupSteps({
     clusters: clusters.data?.items.length ?? 0,
-    policiesReviewed:
-      audit.data?.items.filter((event) =>
-        clusters.data?.items.some((cluster) => cluster.id === event.target_id),
-      ).length ?? 0,
-    users: users.data?.items.filter((user) => !user.disabled).length ?? 0,
+    policiesReviewed: new Set(
+      audit.data?.items
+        .map((event) => event.target_id)
+        .filter((id): id is string => id !== null && clusterIds.has(id)),
+    ).size,
+    users: users.data?.items.filter((member) => !member.disabled).length ?? 0,
     queries: history.data?.items.length ?? 0,
   });
   if (dismissed || complete.every(Boolean)) return null;

@@ -112,16 +112,9 @@ async fn test_clients(
     identity_client: aws_sdk_sts::Client,
     clients: Vec<(String, Client)>,
 ) -> TestReport {
-    let identity = identity_client.get_caller_identity().send().await;
-    let (account_id, identity_arn, identity_ok) = match identity {
-        Ok(identity) => (
-            identity.account().map(String::from),
-            identity.arn().map(String::from),
-            true,
-        ),
-        Err(_) => (None, None, false),
-    };
-    let mut regions: Vec<_> = stream::iter(clients)
+    // Identity and regional probes are independent, so they run together.
+    let identity = async { identity_client.get_caller_identity().send().await };
+    let probes = stream::iter(clients)
         .map(|(region, client)| async move {
             let error = client
                 .describe_db_instances()
@@ -137,8 +130,16 @@ async fn test_clients(
             }
         })
         .buffer_unordered(4)
-        .collect()
-        .await;
+        .collect::<Vec<_>>();
+    let (identity, mut regions) = tokio::join!(identity, probes);
+    let (account_id, identity_arn, identity_ok) = match identity {
+        Ok(identity) => (
+            identity.account().map(String::from),
+            identity.arn().map(String::from),
+            true,
+        ),
+        Err(_) => (None, None, false),
+    };
     if !identity_ok {
         for region in &mut regions {
             region.ok = false;

@@ -241,6 +241,7 @@ export function Confirm({
   description,
   onConfirm,
   busy = false,
+  busyLabel = 'Working…',
   children,
   danger = false,
 }: {
@@ -250,6 +251,8 @@ export function Confirm({
   description: string;
   onConfirm: () => void;
   busy?: boolean;
+  /** Shown on the confirm button while `busy`. */
+  busyLabel?: string;
   children?: ReactNode;
   danger?: boolean;
 }) {
@@ -268,7 +271,7 @@ export function Confirm({
           variant={danger ? 'danger' : 'primary'}
           onClick={onConfirm}
         >
-          {busy ? 'Saving…' : 'Confirm'}
+          {busy ? busyLabel : 'Confirm'}
         </Button>
       </div>
     </Modal>
@@ -424,7 +427,7 @@ export function EngineIcon({ engine }: { engine: string }) {
       ? 'PostgreSQL'
       : 'MySQL';
   return (
-    <span className="engine-icon" title={label} aria-label={label}>
+    <span className="engine-icon" title={label} role="img" aria-label={label}>
       {label === 'MariaDB' ? 'MA' : label === 'PostgreSQL' ? 'PG' : 'MY'}
     </span>
   );
@@ -520,9 +523,14 @@ export function Field({
   group?: boolean;
 }) {
   const id = useId();
-  const control = isValidElement<{ 'aria-describedby'?: string }>(children)
-    ? cloneElement(children, { 'aria-describedby': hint ? id : undefined })
-    : children;
+  const control =
+    hint && isValidElement<{ 'aria-describedby'?: string }>(children)
+      ? cloneElement(children, {
+          'aria-describedby': [children.props['aria-describedby'], id]
+            .filter(Boolean)
+            .join(' '),
+        })
+      : children;
   const Wrapper = group ? 'div' : 'label';
   return (
     <div className="field">

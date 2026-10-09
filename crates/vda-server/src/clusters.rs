@@ -25,6 +25,17 @@ pub(crate) struct Filters {
     engine: Option<String>,
     q: Option<String>,
 }
+/// Escape LIKE metacharacters so a search term matches literally.
+fn escape_like(term: &str) -> String {
+    let mut out = String::with_capacity(term.len());
+    for ch in term.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
 pub(crate) async fn accessible(
     state: &AppState,
     user: &User,
@@ -43,7 +54,7 @@ pub(crate) async fn accessible(
         .bind(filters.project_id)
         .bind(&filters.environment)
         .bind(&filters.engine)
-        .bind(&filters.q)
+        .bind(filters.q.as_deref().map(escape_like))
         .fetch_all(&state.db)
         .await?)
 }
@@ -52,8 +63,10 @@ pub(crate) async fn view(
     user: &User,
     c: ClusterRecord,
 ) -> Result<Value, ApiError> {
-    let access = rbac::effective(&state.db, user, &c).await?;
-    let health = crate::health::current(&state.db, c.id).await?;
+    let (access, health) = futures::try_join!(
+        rbac::effective(&state.db, user, &c),
+        crate::health::current(&state.db, c.id),
+    )?;
     let mut value = json!(c);
     let object = value.as_object_mut().ok_or_else(ApiError::internal)?;
     object.insert("health".into(), json!(health));
@@ -262,14 +275,12 @@ pub(crate) async fn apply_patch(
     if object.keys().any(|k| !fields.contains(&k.as_str())) {
         return Err(ApiError::validation("Unknown cluster field"));
     }
-    if endpoint_changed(&json!(current), &patch)
-        && object.get("password").is_none_or(|p| !p.is_string())
-    {
+    let mut merged = json!(current);
+    if endpoint_changed(&merged, &patch) && object.get("password").is_none_or(|p| !p.is_string()) {
         return Err(ApiError::validation(
             "Changing the connection endpoint requires re-entering the password",
         ));
     }
-    let mut merged = json!(current);
     // A supplied password replaces the stored one; skipping the decrypt lets an
     // admin recover a cluster whose ciphertext predates a master-key change.
     let password = match object.get("password") {
@@ -383,15 +394,19 @@ pub(crate) async fn put_policy(
     rbac::require_level(&state.db, &user, id, AccessLevel::Admin).await?;
     body.validate()?;
     let mut tx = state.db.begin().await?;
-    sqlx::query("UPDATE clusters SET updated_at=clock_timestamp() WHERE id=$1")
+    let touched = sqlx::query("UPDATE clusters SET updated_at=clock_timestamp() WHERE id=$1")
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("UPDATE cluster_policies SET policy=$2 WHERE cluster_id=$1")
+    let stored = sqlx::query("UPDATE cluster_policies SET policy=$2 WHERE cluster_id=$1")
         .bind(id)
         .bind(json!(body))
         .execute(&mut *tx)
         .await?;
+    // The cluster may have been deleted after authorization; do not report success.
+    if touched.rows_affected() == 0 || stored.rows_affected() == 0 {
+        return Err(ApiError::not_found());
+    }
     state
         .audit_change(&mut tx, &user, "policy.update", Some(id), ip.0)
         .await?;
@@ -413,7 +428,6 @@ pub(crate) async fn schema(
 ) -> Result<Json<vda_connectors::SchemaTree>, ApiError> {
     let c = rbac::require_level(&state.db, &user, db::id(&id)?, AccessLevel::Read).await?;
     crate::network::require_cluster(&state, c.id, ip.0).await?;
-    let policy = db::policy(&state.db, c.id).await?;
     if !query.refresh {
         if let Some((version, schema)) = state.schema_cache.get(&c.id).await {
             if version == c.updated_at {
@@ -421,6 +435,7 @@ pub(crate) async fn schema(
             }
         }
     }
+    let policy = db::policy(&state.db, c.id).await?;
     let pools = state.pools.get(&state, &c, &policy).await?;
     let _permit =
         tokio::time::timeout(std::time::Duration::from_secs(2), pools.semaphore.acquire())
@@ -517,6 +532,13 @@ fn endpoint_changed(current: &Value, patch: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn like_search_terms_match_literally() {
+        assert_eq!(escape_like("plain"), "plain");
+        assert_eq!(escape_like("50%_off"), "50\\%\\_off");
+        assert_eq!(escape_like("a\\b"), "a\\\\b");
+        assert_eq!(escape_like(""), "");
+    }
     #[test]
     fn every_connection_field_requires_a_fresh_password_when_changed() {
         let current = json!({"engine":"postgres","host":"db","port":5432,"database":"shop",

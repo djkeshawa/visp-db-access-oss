@@ -1,7 +1,7 @@
 //! Assemble parsing, structural analysis, policy, and executable SQL.
 use crate::{
-    classify, parse, policy, rewrite, syntax, walk, AccessLevel, Analysis, Dialect, GuardPolicy,
-    Issue, Risk, Severity, StatementAnalysis, StatementKind, Verdict,
+    classify, hints, parse, policy, rewrite, syntax, walk, AccessLevel, Analysis, Dialect,
+    GuardPolicy, Issue, Risk, Severity, StatementAnalysis, StatementKind, Verdict,
 };
 use sqlparser::ast::Statement;
 
@@ -58,6 +58,7 @@ pub(crate) fn analyze(
         statements: vec![],
         rewritten_sql: None,
         issues: vec![],
+        suggestions: vec![],
     };
     let mut locks = parsed.lock_syntax.iter().copied();
     for statement in &parsed.statements {
@@ -89,6 +90,12 @@ pub(crate) fn analyze(
             });
         }
     }
+    if analysis.verdict != Verdict::Deny {
+        if let [statement] = parsed.statements.as_slice() {
+            analysis.suggestions =
+                hints::collect(statement, dialect, policy, parsed.lock_syntax.is_empty());
+        }
+    }
     if dialect == Dialect::MySql {
         if let Some(sql) = &mut analysis.rewritten_sql {
             if analysis
@@ -110,6 +117,7 @@ pub(crate) fn denied(code: &str, message: &str) -> Analysis {
         statements: vec![],
         rewritten_sql: None,
         issues: vec![Issue::new(Severity::Block, code, message)],
+        suggestions: vec![],
     }
 }
 

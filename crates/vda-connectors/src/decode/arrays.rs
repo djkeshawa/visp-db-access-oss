@@ -95,7 +95,7 @@ fn scalar(name: &str, bytes: &[u8], is_enum: bool) -> Option<Value> {
         "INT2" => super::signed(i64::from(number!(i16))),
         "INT4" => super::signed(i64::from(number!(i32))),
         "INT8" => super::signed(number!(i64)),
-        "FLOAT4" => super::float(f64::from(number!(f32))),
+        "FLOAT4" => super::float32(number!(f32)),
         "FLOAT8" => super::float(number!(f64)),
         "NUMERIC" => Value::String(super::numeric(bytes)?),
         "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" | "CITEXT" => {

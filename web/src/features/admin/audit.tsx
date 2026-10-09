@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useInfiniteQuery } from '@tanstack/react-query';
 import type { AuditEvent, User, Cluster } from '../../api/types';
@@ -32,8 +32,20 @@ export function AuditPage() {
     next.delete('event');
     setSearchParams(next, { replace: true });
   };
-  const setAction = (value: string) => update('action', value),
-    setActor = (value: string) => update('actor_id', value);
+  const setActor = (value: string) => update('actor_id', value);
+  // The server matches actions exactly, so wait for typing to pause before querying.
+  const [actionInput, setActionInput] = useState(action);
+  const updateRef = useRef(update);
+  updateRef.current = update;
+  useEffect(() => setActionInput(action), [action]);
+  useEffect(() => {
+    if (actionInput === action) return;
+    const timer = setTimeout(
+      () => updateRef.current('action', actionInput.trim()),
+      300,
+    );
+    return () => clearTimeout(timer);
+  }, [actionInput, action]);
   const users = useResource<{ items: User[] }>('/users');
   const clusters = useResource<{ items: Cluster[] }>('/clusters');
   const sentinel = useRef<HTMLDivElement>(null);
@@ -71,19 +83,33 @@ export function AuditPage() {
     observer.observe(element);
     return () => observer.disconnect();
   }, [hasNextPage, isFetchingNextPage, isFetchNextPageError, fetchNextPage]);
-  const loaded = query.data?.pages.flatMap((page) => page.items) ?? [],
-    items = loaded.filter((event) => inDateRange(event.created_at, from, to));
-  const eventLinks = Object.fromEntries(
-    (query.data?.pages ?? []).flatMap((page, index) =>
-      page.items.map((event) => {
-        const next = new URLSearchParams(searchParams);
-        next.set('event', event.id);
-        const cursor = query.data?.pageParams[index];
-        if (typeof cursor === 'string') next.set('cursor', cursor);
-        else next.delete('cursor');
-        return [event.id, `/audit?${next}`];
-      }),
+  const loaded = useMemo(
+      () => query.data?.pages.flatMap((page) => page.items) ?? [],
+      [query.data],
     ),
+    items = useMemo(
+      () => loaded.filter((event) => inDateRange(event.created_at, from, to)),
+      [loaded, from, to],
+    );
+  const eventLinks = useMemo(
+    () =>
+      Object.fromEntries(
+        (query.data?.pages ?? []).flatMap((page, index) =>
+          page.items.map((event) => {
+            const next = new URLSearchParams(searchParams);
+            next.set('event', event.id);
+            const cursor = query.data?.pageParams[index];
+            if (typeof cursor === 'string') next.set('cursor', cursor);
+            else next.delete('cursor');
+            return [event.id, `/audit?${next}`];
+          }),
+        ),
+      ),
+    [query.data, searchParams],
+  );
+  const clusterById = useMemo(
+    () => new Map(clusters.data?.items.map((c) => [c.id, c])),
+    [clusters.data],
   );
   const exportRows = () =>
     download(
@@ -131,8 +157,8 @@ export function AuditPage() {
       </div>
       <div className="filterbar">
         <input
-          value={action}
-          onChange={(e) => setAction(e.target.value)}
+          value={actionInput}
+          onChange={(e) => setActionInput(e.target.value)}
           aria-label="Filter audit action"
           placeholder="Filter action, e.g. query.execute"
         />
@@ -165,7 +191,7 @@ export function AuditPage() {
           onTo={(value) => update('to', value)}
         />
       </div>
-      <p className="loaded-note">
+      <p className="loaded-note" role="status">
         UTC date range · {items.length} matching of {loaded.length} loaded
         events. Export includes these rows only.
       </p>
@@ -186,80 +212,76 @@ export function AuditPage() {
           <table>
             <thead>
               <tr>
-                <th>Action</th>
-                <th>Actor</th>
-                <th>Target</th>
-                <th>IP address</th>
-                <th>Time</th>
-                <th>Details</th>
+                <th scope="col">Action</th>
+                <th scope="col">Actor</th>
+                <th scope="col">Target</th>
+                <th scope="col">IP address</th>
+                <th scope="col">Time</th>
+                <th scope="col">Details</th>
               </tr>
             </thead>
             <tbody>
-              {items.map((event, index) => (
-                <Fragment key={event.id}>
-                  {(index === 0 ||
-                    items[index - 1]?.created_at.slice(0, 10) !==
-                      event.created_at.slice(0, 10)) && (
-                    <tr className="day-heading">
-                      <th colSpan={6} scope="colgroup">
-                        {dayLabel(event.created_at)}
-                      </th>
+              {items.map((event, index) => {
+                const target = event.target_id
+                  ? clusterById.get(event.target_id)
+                  : undefined;
+                return (
+                  <Fragment key={event.id}>
+                    {(index === 0 ||
+                      items[index - 1]?.created_at.slice(0, 10) !==
+                        event.created_at.slice(0, 10)) && (
+                      <tr className="day-heading">
+                        <th colSpan={6} scope="colgroup">
+                          {dayLabel(event.created_at)}
+                        </th>
+                      </tr>
+                    )}
+                    <tr>
+                      <td>
+                        <AuditStatement event={event} />
+                      </td>
+                      <td>{event.actor?.email ?? 'System'}</td>
+                      <td>
+                        {event.target_type === 'cluster' && event.target_id ? (
+                          <Link to={`/clusters/${event.target_id}`}>
+                            {clusterById.get(event.target_id)?.name ??
+                              'Cluster'}
+                          </Link>
+                        ) : (
+                          event.target_type
+                        )}
+                        {target ? (
+                          <small>
+                            <EnvBadge environment={target.environment} />
+                          </small>
+                        ) : (
+                          <small
+                            className="mono"
+                            title={event.target_id ?? undefined}
+                          >
+                            {event.target_id ?? '—'}
+                          </small>
+                        )}
+                      </td>
+                      <td className="mono muted">{event.ip ?? '—'}</td>
+                      <td className="nowrap">
+                        <RelativeTime value={event.created_at} />
+                      </td>
+                      <td>
+                        <details open={searchParams.get('event') === event.id}>
+                          <summary>JSON details</summary>
+                          <Link to={eventLinks[event.id] ?? '/audit'}>
+                            Link to event
+                          </Link>
+                          <pre className="json-preview" tabIndex={0}>
+                            {JSON.stringify(event.details, null, 2)}
+                          </pre>
+                        </details>
+                      </td>
                     </tr>
-                  )}
-                  <tr>
-                    <td>
-                      <AuditStatement event={event} />
-                    </td>
-                    <td>{event.actor?.email ?? 'System'}</td>
-                    <td>
-                      {event.target_type === 'cluster' && event.target_id ? (
-                        <Link to={`/clusters/${event.target_id}`}>
-                          {clusters.data?.items.find(
-                            (cluster) => cluster.id === event.target_id,
-                          )?.name ?? 'Cluster'}
-                        </Link>
-                      ) : (
-                        event.target_type
-                      )}
-                      {clusters.data?.items.find(
-                        (cluster) => cluster.id === event.target_id,
-                      ) ? (
-                        <small>
-                          <EnvBadge
-                            environment={
-                              clusters.data.items.find(
-                                (cluster) => cluster.id === event.target_id,
-                              )!.environment
-                            }
-                          />
-                        </small>
-                      ) : (
-                        <small
-                          className="mono"
-                          title={event.target_id ?? undefined}
-                        >
-                          {event.target_id ?? '—'}
-                        </small>
-                      )}
-                    </td>
-                    <td className="mono muted">{event.ip ?? '—'}</td>
-                    <td className="nowrap">
-                      <RelativeTime value={event.created_at} />
-                    </td>
-                    <td>
-                      <details open={searchParams.get('event') === event.id}>
-                        <summary>JSON details</summary>
-                        <Link to={eventLinks[event.id] ?? '/audit'}>
-                          Link to event
-                        </Link>
-                        <pre className="json-preview" tabIndex={0}>
-                          {JSON.stringify(event.details, null, 2)}
-                        </pre>
-                      </details>
-                    </td>
-                  </tr>
-                </Fragment>
-              ))}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>

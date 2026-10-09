@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import type {
   DiscoverySource,
   DiscoveryTest,
@@ -80,7 +80,7 @@ function RegionSelect({
   onChange: (value: string[]) => void;
 }) {
   const [search, setSearch] = useState('');
-  const groups = groupRegions(search);
+  const groups = useMemo(() => groupRegions(search), [search]);
   return (
     <fieldset className="region-select">
       <legend>
@@ -91,6 +91,10 @@ function RegionSelect({
         placeholder="Search region or location…"
         value={search}
         onChange={(e) => setSearch(e.target.value)}
+        onKeyDown={(e) => {
+          // Enter must not submit the surrounding source form.
+          if (e.key === 'Enter') e.preventDefault();
+        }}
       />
       <div className="discovery-chips">
         {value.map((region) => (
@@ -164,7 +168,8 @@ export function SourceForm({
     value: SourceDraft[K],
   ) => {
     setDraft((draft) => ({ ...draft, [field]: value }));
-    test.reset();
+    // A passed test only goes stale when connection settings change.
+    if (['role_arn', 'external_id', 'regions'].includes(field)) test.reset();
   };
   const connectionChanged =
     !source ||
@@ -197,7 +202,7 @@ export function SourceForm({
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          if (valid)
+          if (valid && !save.isPending && !test.isPending)
             save.mutate(
               {
                 path: source

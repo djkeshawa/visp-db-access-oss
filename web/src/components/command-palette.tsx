@@ -130,6 +130,10 @@ export function CommandPalette({
         <input
           autoFocus
           aria-label="Search pages and clusters"
+          aria-controls="command-results"
+          aria-activedescendant={
+            items.length > 0 ? `command-${selected}` : undefined
+          }
           placeholder="Search commands…"
           value={search}
           onChange={(event) => {
@@ -156,9 +160,16 @@ export function CommandPalette({
           }}
         />
       </div>
-      <div className="command-results" aria-label="Commands">
+      <div
+        className="command-results"
+        id="command-results"
+        role="group"
+        aria-label="Commands"
+      >
         {items.length === 0 && (
-          <p className="muted">No matches. Try a page or cluster name.</p>
+          <p className="muted" role="status">
+            No matches. Try a page or cluster name.
+          </p>
         )}
         {items.map((item, index) => (
           <div key={item.id}>
@@ -168,6 +179,7 @@ export function CommandPalette({
             <Button
               id={`command-${index}`}
               variant="ghost"
+              aria-current={selected === index ? 'true' : undefined}
               className={selected === index ? 'command-selected' : ''}
               onClick={() => run(index)}
               title={item.label}

@@ -149,3 +149,22 @@ it('does not show an offline banner for an aborted read', async () => {
   });
   expect(dispatchEvent).not.toHaveBeenCalled();
 });
+it('reports an unreadable success body as a typed error', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(new Response('<html>', { status: 200 })),
+  );
+  await expect(request('/overview')).rejects.toMatchObject({
+    name: 'ApiError',
+    code: 'invalid_response',
+    status: 200,
+  });
+});
+it('survives a 401 outside a browser without a location', async () => {
+  vi.stubGlobal('location', undefined);
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(new Response('{}', { status: 401 })),
+  );
+  await expect(request('/auth/me')).rejects.toMatchObject({ status: 401 });
+});

@@ -25,7 +25,7 @@ export function PersonalSettings() {
         <form
           onSubmit={(event) => {
             event.preventDefault();
-            if (user?.org_role === 'admin')
+            if (user?.org_role === 'admin' && !profile.isPending)
               profile.mutate({
                 path: `/users/${user.id}`,
                 method: 'PATCH',
@@ -48,7 +48,9 @@ export function PersonalSettings() {
             <Button
               type="submit"
               variant="secondary"
-              disabled={profile.isPending || !name.trim() || name === user.name}
+              disabled={
+                profile.isPending || !name.trim() || name.trim() === user.name
+              }
             >
               {profile.isPending ? 'Saving…' : 'Save name'}
             </Button>
@@ -64,6 +66,7 @@ export function PersonalSettings() {
         <form
           onSubmit={(event) => {
             event.preventDefault();
+            if (password.isPending) return;
             const form = event.currentTarget;
             password.mutate(
               {

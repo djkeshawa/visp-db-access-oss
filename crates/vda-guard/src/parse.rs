@@ -160,29 +160,40 @@ fn check_comments(tokens: &[Token], dialect: Dialect) -> Result<(), ParseFailure
 // The parser limits recursive descent, but left-associative ASTs can still get
 // arbitrarily deep. Bound those chains before constructing, walking, or dropping them.
 fn bound_complexity(tokens: &[Token]) -> Result<(), ParseFailure> {
+    // Words that build left-deep infix or postfix chains (`x IS NULL IS NULL ...`)
+    // count like punctuation operators; other keywords and identifiers do not.
+    const CHAIN_WORDS: [&str; 20] = [
+        "AND", "OR", "NOT", "WHEN", "IS", "ISNULL", "NOTNULL", "IN", "LIKE", "ILIKE", "RLIKE",
+        "REGEXP", "SIMILAR", "COLLATE", "AT", "XOR", "DIV", "MOD", "OVERLAPS", "ESCAPE",
+    ];
     let mut chains = vec![0_usize];
+    // Running sum of `chains`, so each token costs O(1) instead of O(depth).
+    let mut total = 0_usize;
     let mut sets = 0_usize;
     for token in tokens {
         match token {
             Token::SemiColon => {
                 chains.clear();
                 chains.push(0);
+                total = 0;
                 sets = 0;
             }
             Token::Comma => {
                 if let Some(chain) = chains.last_mut() {
+                    total = total.saturating_sub(*chain);
                     *chain = 0;
                 }
             }
             Token::LParen | Token::LBracket => {
                 if let Some(chain) = chains.last_mut() {
                     *chain += 1;
+                    total += 1;
                 }
                 chains.push(0);
             }
             Token::RParen | Token::RBracket => {
                 if chains.len() > 1 {
-                    chains.pop();
+                    total = total.saturating_sub(chains.pop().unwrap_or(0));
                 }
             }
             Token::Word(w)
@@ -192,13 +203,10 @@ fn bound_complexity(tokens: &[Token]) -> Result<(), ParseFailure> {
             {
                 sets += 1;
             }
-            Token::Word(w)
-                if ["AND", "OR", "NOT", "WHEN"]
-                    .iter()
-                    .any(|k| w.value.eq_ignore_ascii_case(k)) =>
-            {
+            Token::Word(w) if CHAIN_WORDS.iter().any(|k| w.value.eq_ignore_ascii_case(k)) => {
                 if let Some(chain) = chains.last_mut() {
                     *chain += 1;
+                    total += 1;
                 }
             }
             Token::Word(_)
@@ -208,10 +216,11 @@ fn bound_complexity(tokens: &[Token]) -> Result<(), ParseFailure> {
             _ => {
                 if let Some(chain) = chains.last_mut() {
                     *chain += 1;
+                    total += 1;
                 }
             }
         }
-        if chains.len() > 64 || chains.iter().sum::<usize>() > 128 || sets > 64 {
+        if chains.len() > 64 || total > 128 || sets > 64 {
             return Err(ParseFailure::Parser("SQL expression is too complex to analyze safely. Split long expression or set-operation chains.".into()));
         }
     }

@@ -1,4 +1,4 @@
-import { Fragment, useState } from 'react';
+import { Fragment, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { ChevronDown, Terminal } from 'lucide-react';
@@ -34,6 +34,10 @@ export function HistoryTable({
   clusters?: Cluster[];
 }) {
   const [expanded, setExpanded] = useState<string | null>(initialExpanded);
+  const clusterById = useMemo(
+    () => new Map(clusters.map((cluster) => [cluster.id, cluster])),
+    [clusters],
+  );
   if (!items.length)
     return (
       <Empty
@@ -64,126 +68,130 @@ export function HistoryTable({
           </tr>
         </thead>
         <tbody>
-          {items.map((entry, index) => (
-            <Fragment key={entry.id}>
-              {(index === 0 ||
-                items[index - 1]?.created_at.slice(0, 10) !==
-                  entry.created_at.slice(0, 10)) && (
-                <tr className="day-heading">
-                  <th colSpan={showUser ? 8 : 7} scope="colgroup">
-                    {dayLabel(entry.created_at)}
-                  </th>
-                </tr>
-              )}
-              <tr>
-                <td className="sql-preview">
-                  <button
-                    onClick={() =>
-                      setExpanded(expanded === entry.id ? null : entry.id)
-                    }
-                    aria-expanded={expanded === entry.id}
-                  >
-                    <span>
-                      <span className="sql-summary">
-                        {statementSummary(entry.sql)}
+          {items.map((entry, index) => {
+            const entryCluster = clusterById.get(entry.cluster_id);
+            return (
+              <Fragment key={entry.id}>
+                {(index === 0 ||
+                  items[index - 1]?.created_at.slice(0, 10) !==
+                    entry.created_at.slice(0, 10)) && (
+                  <tr className="day-heading">
+                    <th colSpan={showUser ? 8 : 7} scope="colgroup">
+                      {dayLabel(entry.created_at)}
+                    </th>
+                  </tr>
+                )}
+                <tr>
+                  <td className="sql-preview">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExpanded(expanded === entry.id ? null : entry.id)
+                      }
+                      aria-expanded={expanded === entry.id}
+                      aria-controls={
+                        expanded === entry.id
+                          ? `history-expanded-${entry.id}`
+                          : undefined
+                      }
+                    >
+                      <span>
+                        <span className="sql-summary">
+                          {statementSummary(entry.sql)}
+                        </span>
+                        <SqlPreview sql={entry.sql} />
                       </span>
-                      <SqlPreview sql={entry.sql} />
-                    </span>
-                    <ChevronDown size={14} />
-                  </button>
-                  {expanded === entry.id && (
-                    <div className="history-expanded">
-                      <pre>{entry.sql}</pre>
-                      {entry.error && (
-                        <p className="error-text">{entry.error}</p>
-                      )}
-                      <Link
-                        className="button secondary"
-                        to={
-                          entryLinks[entry.id] ??
-                          `/history?cluster_id=${entry.cluster_id}&entry=${entry.id}`
-                        }
+                      <ChevronDown size={14} />
+                    </button>
+                    {expanded === entry.id && (
+                      <div
+                        className="history-expanded"
+                        id={`history-expanded-${entry.id}`}
                       >
-                        Link to query
-                      </Link>
-                      <Link
-                        className="button secondary"
-                        to={`/console?cluster_id=${entry.cluster_id}&sql=${encodeURIComponent(entry.sql)}`}
-                      >
-                        <Terminal size={13} />
-                        Open in console
-                      </Link>
-                    </div>
-                  )}
-                </td>
-                <td>
-                  <Link to={`/clusters/${entry.cluster_id}`}>
-                    {entry.cluster_name}
-                  </Link>
-                  {clusters.find(
-                    (cluster) => cluster.id === entry.cluster_id,
-                  ) && (
-                    <small>
-                      <EnvBadge
-                        environment={
-                          clusters.find(
-                            (cluster) => cluster.id === entry.cluster_id,
-                          )!.environment
-                        }
-                      />
-                    </small>
-                  )}
-                </td>
-                {showUser && <td className="muted">{entry.user_email}</td>}
-                <td>
-                  <Badge
-                    variant="verdict"
-                    tone={
-                      entry.verdict === 'allow'
-                        ? 'success'
+                        <pre>{entry.sql}</pre>
+                        {entry.error && (
+                          <p className="error-text">{entry.error}</p>
+                        )}
+                        <Link
+                          className="button secondary"
+                          to={
+                            entryLinks[entry.id] ??
+                            `/history?cluster_id=${entry.cluster_id}&entry=${entry.id}`
+                          }
+                        >
+                          Link to query
+                        </Link>
+                        <Link
+                          className="button secondary"
+                          to={`/console?cluster_id=${entry.cluster_id}&sql=${encodeURIComponent(entry.sql)}`}
+                        >
+                          <Terminal size={13} />
+                          Open in console
+                        </Link>
+                      </div>
+                    )}
+                  </td>
+                  <td>
+                    <Link to={`/clusters/${entry.cluster_id}`}>
+                      {entry.cluster_name}
+                    </Link>
+                    {entryCluster && (
+                      <small>
+                        <EnvBadge environment={entryCluster.environment} />
+                      </small>
+                    )}
+                  </td>
+                  {showUser && <td className="muted">{entry.user_email}</td>}
+                  <td>
+                    <Badge
+                      variant="verdict"
+                      tone={
+                        entry.verdict === 'allow'
+                          ? 'success'
+                          : entry.verdict === 'requires_approval'
+                            ? 'warning'
+                            : 'danger'
+                      }
+                    >
+                      {entry.verdict === 'deny'
+                        ? 'Blocked'
                         : entry.verdict === 'requires_approval'
-                          ? 'warning'
-                          : 'danger'
-                    }
-                  >
-                    {entry.verdict === 'deny'
-                      ? 'Blocked'
-                      : entry.verdict === 'requires_approval'
-                        ? 'Needs approval'
-                        : 'Allowed'}
-                  </Badge>
-                  {/* A denied query's status is "blocked" too; say it once. */}
-                  {!(
-                    entry.verdict === 'deny' && entry.status === 'blocked'
-                  ) && (
-                    <small className="muted">
-                      {entry.status === 'ok'
-                        ? 'Completed'
-                        : entry.status.charAt(0).toUpperCase() +
-                          entry.status.slice(1)}
-                    </small>
-                  )}
-                </td>
-                <td className="numeric">
-                  {entry.row_count?.toLocaleString() ?? '—'}
-                </td>
-                <td className="numeric muted">
-                  {entry.elapsed_ms !== null ? `${entry.elapsed_ms} ms` : '—'}
-                </td>
-                <td className="muted nowrap">
-                  <RelativeTime value={entry.created_at} />
-                </td>
-                <td>
-                  <Link
-                    aria-label="Open query in console"
-                    to={`/console?cluster_id=${entry.cluster_id}&sql=${encodeURIComponent(entry.sql)}`}
-                  >
-                    <Terminal size={15} />
-                  </Link>
-                </td>
-              </tr>
-            </Fragment>
-          ))}
+                          ? 'Needs approval'
+                          : 'Allowed'}
+                    </Badge>
+                    {/* A denied query's status is "blocked" too; say it once. */}
+                    {!(
+                      entry.verdict === 'deny' && entry.status === 'blocked'
+                    ) && (
+                      <small className="muted">
+                        {entry.status === 'ok'
+                          ? 'Completed'
+                          : entry.status.charAt(0).toUpperCase() +
+                            entry.status.slice(1)}
+                      </small>
+                    )}
+                  </td>
+                  <td className="numeric">
+                    {entry.row_count?.toLocaleString() ?? '—'}
+                  </td>
+                  <td className="numeric muted">
+                    {entry.elapsed_ms !== null ? `${entry.elapsed_ms} ms` : '—'}
+                  </td>
+                  <td className="muted nowrap">
+                    <RelativeTime value={entry.created_at} />
+                  </td>
+                  <td>
+                    <Link
+                      aria-label="Open query in console"
+                      to={`/console?cluster_id=${entry.cluster_id}&sql=${encodeURIComponent(entry.sql)}`}
+                    >
+                      <Terminal size={15} />
+                    </Link>
+                  </td>
+                </tr>
+              </Fragment>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -228,19 +236,29 @@ export function HistoryPage() {
     initialPageParam: searchParams.get('cursor') as string | null,
     getNextPageParam: (page) => page.next_cursor ?? undefined,
   });
-  const loaded = query.data?.pages.flatMap((page) => page.items) ?? [],
-    items = loaded.filter((entry) => inDateRange(entry.created_at, from, to));
-  const entryLinks = Object.fromEntries(
-    (query.data?.pages ?? []).flatMap((page, index) =>
-      page.items.map((entry) => {
-        const next = new URLSearchParams(searchParams);
-        next.set('entry', entry.id);
-        const cursor = query.data?.pageParams[index];
-        if (typeof cursor === 'string') next.set('cursor', cursor);
-        else next.delete('cursor');
-        return [entry.id, `/history?${next}`];
-      }),
+  const loaded = useMemo(
+      () => query.data?.pages.flatMap((page) => page.items) ?? [],
+      [query.data],
     ),
+    items = useMemo(
+      () => loaded.filter((entry) => inDateRange(entry.created_at, from, to)),
+      [loaded, from, to],
+    );
+  const entryLinks = useMemo(
+    () =>
+      Object.fromEntries(
+        (query.data?.pages ?? []).flatMap((page, index) =>
+          page.items.map((entry) => {
+            const next = new URLSearchParams(searchParams);
+            next.set('entry', entry.id);
+            const cursor = query.data?.pageParams[index];
+            if (typeof cursor === 'string') next.set('cursor', cursor);
+            else next.delete('cursor');
+            return [entry.id, `/history?${next}`];
+          }),
+        ),
+      ),
+    [query.data, searchParams],
   );
   const exportRows = () =>
     download(
@@ -374,7 +392,7 @@ export function HistoryPage() {
           entryLinks={entryLinks}
           showUser={user?.org_role === 'admin'}
         />
-      )}{' '}
+      )}
       {query.isFetchNextPageError && (
         <ErrorPanel
           error={query.error}

@@ -10,7 +10,7 @@ pub(crate) fn has_limit(query: &Query) -> bool {
         }
 }
 
-fn number(expr: &Expr) -> Option<u64> {
+pub(crate) fn number(expr: &Expr) -> Option<u64> {
     match expr {
         Expr::Value(v) => match &v.value {
             Value::Number(n, _) => n.parse().ok(),

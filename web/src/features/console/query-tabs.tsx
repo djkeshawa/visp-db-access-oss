@@ -130,7 +130,7 @@ export function QueryTabs({
       </Tip>
       <Button
         variant="ghost"
-        aria-label={`Close ${current?.name}`}
+        aria-label={`Close ${current?.name ?? 'query'}`}
         disabled={busy || tabs.length < 2}
         onClick={onClose}
       >

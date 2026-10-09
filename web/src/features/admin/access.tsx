@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useDeferredValue, useEffect, useMemo, useState } from 'react';
 import { useInfiniteQuery } from '@tanstack/react-query';
 import type { Grant, Page } from '../../api/types';
 import { params, request } from '../../api/client';
@@ -20,17 +20,42 @@ export function AccessPage() {
     initialPageParam: null as string | null,
     getNextPageParam: (page) => page.next_cursor ?? undefined,
   });
-  const items =
-    query.data?.pages
-      .flatMap((page) => page.items)
-      .filter(
-        (grant) =>
-          `${grant.user.name} ${grant.user.email} ${grant.scope_name}`
-            .toLowerCase()
-            .includes(search.toLowerCase()) &&
-          (scope === 'all' || grant.scope === scope) &&
-          (level === 'all' || grant.level === level),
-      ) ?? [];
+  const deferredSearch = useDeferredValue(search.trim().toLowerCase());
+  const items = useMemo(
+    () =>
+      query.data?.pages
+        .flatMap((page) => page.items)
+        .filter(
+          (grant) =>
+            `${grant.user.name} ${grant.user.email} ${grant.scope_name}`
+              .toLowerCase()
+              .includes(deferredSearch) &&
+            (scope === 'all' || grant.scope === scope) &&
+            (level === 'all' || grant.level === level),
+        ) ?? [],
+    [query.data, deferredSearch, scope, level],
+  );
+  const { hasNextPage, isFetching, isFetchNextPageError, fetchNextPage } =
+    query;
+  const clientFiltered = !!deferredSearch || level !== 'all';
+  // Search and level are applied to loaded pages, so keep paging while they hide everything.
+  useEffect(() => {
+    if (
+      clientFiltered &&
+      !items.length &&
+      hasNextPage &&
+      !isFetching &&
+      !isFetchNextPageError
+    )
+      void fetchNextPage();
+  }, [
+    clientFiltered,
+    items.length,
+    hasNextPage,
+    isFetching,
+    isFetchNextPageError,
+    fetchNextPage,
+  ]);
   return (
     <>
       <div className="page-heading">
@@ -70,7 +95,7 @@ export function AccessPage() {
         />
       </div>
       {(search || level !== 'all') && (
-        <p className="muted">
+        <p className="muted" role="status">
           Search and level filters apply to loaded grants. Load more to include
           the next page.
         </p>

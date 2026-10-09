@@ -1,5 +1,5 @@
 import type { Cluster, Engine, Health, Project } from '../../api/types';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAction, useResource } from '../../lib/query';
 import {
   Button,
@@ -68,6 +68,16 @@ const initialDraft: ClusterDraft = {
   replica_port: null,
   tags: {},
 };
+/** Parses `key=value, key2=value2`; values may themselves contain `=`. */
+function parseTags(text: string): Record<string, string> {
+  const tags: Record<string, string> = {};
+  for (const part of text.split(',')) {
+    const tag = part.trim();
+    const at = tag.indexOf('=');
+    if (at > 0) tags[tag.slice(0, at).trim()] = tag.slice(at + 1).trim();
+  }
+  return tags;
+}
 const options = (values: string[]) =>
   values.map((value) => ({ value, label: value.replaceAll('_', ' ') }));
 export function ConnectionFields({
@@ -189,6 +199,20 @@ export function ConnectionTest({
   requirePassword?: boolean;
 }) {
   const test = useAction<Health>('');
+  const { reset } = test;
+  // A result only describes the endpoint that was tested; drop it on edits.
+  useEffect(() => {
+    reset();
+  }, [
+    reset,
+    draft.engine,
+    draft.host,
+    draft.port,
+    draft.database,
+    draft.username,
+    draft.tls_mode,
+    draft.password,
+  ]);
   return (
     <div className="connection-test">
       <Button
@@ -218,7 +242,7 @@ export function ConnectionTest({
       >
         {test.isPending ? 'Testing…' : 'Test connection'}
       </Button>
-      {test.error && <ErrorPanel error={test.error} />}{' '}
+      {test.error && <ErrorPanel error={test.error} />}
       {test.data && (
         <div className="callout success">
           <HealthBadge
@@ -243,13 +267,29 @@ export function AddCluster({
 }) {
   const [draft, setDraft] = useState<ClusterDraft>(initialDraft),
     [step, setStep] = useState(0),
-    [createProject, setCreateProject] = useState(false);
+    [createProject, setCreateProject] = useState(false),
+    [tagsText, setTagsText] = useState(''),
+    [newProject, setNewProject] = useState('');
   const projects = useResource<{ items: Project[] }>('/projects'),
     addProject = useAction<Project>('Project created'),
     create = useAction<Cluster>('Cluster created');
   const update = (values: Partial<ClusterDraft>) =>
     setDraft((draft) => ({ ...draft, ...values }));
   const policy = defaultPolicy(draft.environment);
+  const submitProject = () => {
+    const name = newProject.trim();
+    if (!name || addProject.isPending) return;
+    addProject.mutate(
+      { path: '/projects', body: { name, description: '' } },
+      {
+        onSuccess: (project) => {
+          update({ project_id: project.id });
+          setCreateProject(false);
+          setNewProject('');
+        },
+      },
+    );
+  };
   return (
     <Modal
       open={open}
@@ -272,6 +312,7 @@ export function AddCluster({
       <form
         onSubmit={(event) => {
           event.preventDefault();
+          if (create.isPending) return;
           if (step < 2) {
             if (step === 0 && !draft.project_id) return;
             setStep(step + 1);
@@ -290,6 +331,7 @@ export function AddCluster({
                 onSuccess: () => {
                   onOpenChange(false);
                   setDraft(initialDraft);
+                  setTagsText('');
                   setStep(0);
                 },
               },
@@ -312,7 +354,10 @@ export function AddCluster({
                   }
                 />
               </Field>
-              <Button onClick={() => setCreateProject((value) => !value)}>
+              <Button
+                aria-expanded={createProject}
+                onClick={() => setCreateProject((value) => !value)}
+              >
                 + Create project
               </Button>
               <Field label="Cluster name">
@@ -357,44 +402,30 @@ export function AddCluster({
                 hint="Comma-separated key=value pairs, e.g. team=commerce, owner=platform"
               >
                 <input
-                  onChange={(e) =>
-                    update({
-                      tags: Object.fromEntries(
-                        e.target.value
-                          .split(',')
-                          .map((tag) => tag.trim().split('='))
-                          .filter((parts) => parts.length === 2)
-                          .map((parts) => [parts[0] ?? '', parts[1] ?? '']),
-                      ),
-                    })
-                  }
+                  value={tagsText}
+                  onChange={(e) => {
+                    setTagsText(e.target.value);
+                    update({ tags: parseTags(e.target.value) });
+                  }}
                 />
               </Field>
             </div>
             {createProject && (
               <div className="inline-project">
                 <Field label="New project name">
-                  <input id="inline-project-name" />
+                  <input
+                    value={newProject}
+                    onChange={(e) => setNewProject(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key !== 'Enter') return;
+                      e.preventDefault();
+                      submitProject();
+                    }}
+                  />
                 </Field>
                 <Button
-                  disabled={addProject.isPending}
-                  onClick={() => {
-                    const name = (
-                      document.getElementById(
-                        'inline-project-name',
-                      ) as HTMLInputElement | null
-                    )?.value.trim();
-                    if (name)
-                      addProject.mutate(
-                        { path: '/projects', body: { name, description: '' } },
-                        {
-                          onSuccess: (project) => {
-                            update({ project_id: project.id });
-                            setCreateProject(false);
-                          },
-                        },
-                      );
-                  }}
+                  disabled={addProject.isPending || !newProject.trim()}
+                  onClick={submitProject}
                 >
                   Create project
                 </Button>

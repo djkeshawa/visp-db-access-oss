@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import type { Cluster, HistoryEntry, Project } from '../../api/types';
 import { Badge, EngineIcon, HealthBadge } from '../../components/ui';
@@ -16,15 +17,19 @@ export function ClusterCollection({
   view: string;
 }) {
   const navigate = useNavigate();
-  const projectNames = new Map(
-    projects.map((project) => [project.id, project.name]),
+  const projectNames = useMemo(
+    () => new Map(projects.map((project) => [project.id, project.name])),
+    [projects],
   );
-  const lastQueried = new Map<string, string>();
-  for (const entry of history) {
-    const previous = lastQueried.get(entry.cluster_id);
-    if (!previous || Date.parse(entry.created_at) > Date.parse(previous))
-      lastQueried.set(entry.cluster_id, entry.created_at);
-  }
+  const lastQueried = useMemo(() => {
+    const latest = new Map<string, string>();
+    for (const entry of history) {
+      const previous = latest.get(entry.cluster_id);
+      if (!previous || Date.parse(entry.created_at) > Date.parse(previous))
+        latest.set(entry.cluster_id, entry.created_at);
+    }
+    return latest;
+  }, [history]);
   return environments.map((environment) => {
     const clusters = items.filter(
       (cluster) => cluster.environment === environment,

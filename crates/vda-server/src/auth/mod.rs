@@ -71,14 +71,17 @@ pub async fn csrf(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 /// Load active sessions and slide expiration without exceeding the absolute lifetime.
+/// Sliding is skipped while more than 715 minutes remain, so busy sessions do not write per request.
 pub async fn authenticate(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
     let jar = CookieJar::from_headers(req.headers());
     let result=async {
         let token=jar.get("vda_session").ok_or_else(ApiError::unauthenticated)?.value();
         if URL_SAFE_NO_PAD.decode(token).is_err_and(|_|true) || token.len()!=43 {return Err(ApiError::unauthenticated());}
         let user:Option<User>=sqlx::query_as(
-"WITH active AS (UPDATE sessions SET expires_at=LEAST(now()+interval '12 hours',absolute_expires_at)
-         WHERE token_hash=$1 AND expires_at>now() AND absolute_expires_at>now() RETURNING user_id) SELECT
+"WITH active AS (SELECT user_id FROM sessions WHERE token_hash=$1 AND expires_at>now() AND
+         absolute_expires_at>now()), slid AS (UPDATE sessions SET expires_at=LEAST(now()+interval '12 hours',absolute_expires_at)
+         WHERE token_hash=$1 AND expires_at>now() AND absolute_expires_at>now()
+         AND expires_at<LEAST(now()+interval '715 minutes',absolute_expires_at) RETURNING 1) SELECT
          u.id,u.email,u.name,u.org_role,u.disabled,u.created_at,u.last_login_at FROM users u JOIN active a ON
          a.user_id=u.id WHERE NOT u.disabled",
 )

@@ -1,6 +1,6 @@
 import '@fontsource-variable/inter/opsz.css';
 import '@fontsource-variable/jetbrains-mono';
-import { StrictMode, Suspense, lazy } from 'react';
+import { StrictMode, lazy } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Link, Navigate, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -12,7 +12,7 @@ import { PreferencesProvider } from './lib/preferences';
 import { ThemeProvider } from './lib/theme';
 import { Shell } from './components/shell';
 import { ToastProvider } from './components/ui/toast';
-import { Empty, RouteBoundary, Skeleton } from './components/ui';
+import { Empty, RouteBoundary } from './components/ui';
 import { Login } from './features/auth/login';
 import { AdminOnly, Session } from './features/auth/session';
 const OverviewPage = lazy(() =>
@@ -94,92 +94,80 @@ if (root)
               <ToastProvider>
                 <BrowserRouter>
                   <RouteBoundary>
-                    <Suspense
-                      fallback={
-                        <>
-                          <h1>Loading workspace</h1>
-                          <Skeleton />
-                        </>
-                      }
-                    >
-                      <Routes>
-                        <Route path="/login" element={<Login />} />
+                    <Routes>
+                      <Route path="/login" element={<Login />} />
+                      <Route
+                        element={
+                          <Session>
+                            <Shell />
+                          </Session>
+                        }
+                      >
                         <Route
+                          index
+                          element={<Navigate to="/overview" replace />}
+                        />
+                        <Route path="/overview" element={<OverviewPage />} />
+                        <Route path="/clusters" element={<Clusters />} />
+                        <Route
+                          path="/clusters/:id"
+                          element={<ClusterDetail />}
+                        />
+                        <Route path="/console" element={<ConsolePage />} />
+                        <Route path="/approvals" element={<ApprovalsPage />} />
+                        <Route path="/history" element={<HistoryPage />} />
+                        <Route
+                          path="/users"
                           element={
-                            <Session>
-                              <Shell />
-                            </Session>
+                            <AdminOnly>
+                              <UsersPage />
+                            </AdminOnly>
                           }
-                        >
-                          <Route
-                            index
-                            element={<Navigate to="/overview" replace />}
-                          />
-                          <Route path="/overview" element={<OverviewPage />} />
-                          <Route path="/clusters" element={<Clusters />} />
-                          <Route
-                            path="/clusters/:id"
-                            element={<ClusterDetail />}
-                          />
-                          <Route path="/console" element={<ConsolePage />} />
-                          <Route
-                            path="/approvals"
-                            element={<ApprovalsPage />}
-                          />
-                          <Route path="/history" element={<HistoryPage />} />
-                          <Route
-                            path="/users"
-                            element={
+                        />
+                        <Route path="/access" element={<AccessPage />} />
+                        <Route
+                          path="/audit"
+                          element={
+                            <AdminOnly>
+                              <AuditPage />
+                            </AdminOnly>
+                          }
+                        />
+                        <Route path="/settings" element={<SettingsPage />} />
+                        <Route
+                          path="/ui"
+                          element={
+                            KitchenSink ? (
                               <AdminOnly>
-                                <UsersPage />
+                                <KitchenSink />
                               </AdminOnly>
-                            }
-                          />
-                          <Route path="/access" element={<AccessPage />} />
-                          <Route
-                            path="/audit"
-                            element={
-                              <AdminOnly>
-                                <AuditPage />
-                              </AdminOnly>
-                            }
-                          />
-                          <Route path="/settings" element={<SettingsPage />} />
-                          <Route
-                            path="/ui"
-                            element={
-                              KitchenSink ? (
-                                <AdminOnly>
-                                  <KitchenSink />
-                                </AdminOnly>
-                              ) : (
-                                <Navigate to="/missing" replace />
-                              )
-                            }
-                          />
-                          <Route
-                            path="*"
-                            element={
-                              <>
-                                <h1>Page not found</h1>
-                                <Empty
-                                  title="This page isn’t here"
-                                  description="Check the address or return to your workspace."
-                                  action={
-                                    <Link
-                                      className="button primary"
-                                      to="/overview"
-                                    >
-                                      Back to overview
-                                    </Link>
-                                  }
-                                />
-                              </>
-                            }
-                          />
-                        </Route>
-                      </Routes>
-                    </Suspense>
+                            ) : (
+                              <Navigate to="/missing" replace />
+                            )
+                          }
+                        />
+                        <Route
+                          path="*"
+                          element={
+                            <>
+                              <h1>Page not found</h1>
+                              <Empty
+                                title="This page isn’t here"
+                                description="Check the address or return to your workspace."
+                                action={
+                                  <Link
+                                    className="button primary"
+                                    to="/overview"
+                                  >
+                                    Back to overview
+                                  </Link>
+                                }
+                              />
+                            </>
+                          }
+                        />
+                      </Route>
+                    </Routes>
                   </RouteBoundary>
                 </BrowserRouter>
               </ToastProvider>

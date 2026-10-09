@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { X } from 'lucide-react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { expiryLabel, sqlDiff, guardedSqlChanged } from '../../lib/sql-diff';
@@ -62,11 +62,21 @@ export function ApprovalsPage() {
     getNextPageParam: (page) => page.next_cursor ?? undefined,
     refetchInterval: 5000,
   });
-  const loaded = query.data?.pages.flatMap((page) => page.items) ?? [];
-  const items = loaded.filter((item) =>
-    `${item.reason} ${item.sql} ${item.requester.name}`
-      .toLowerCase()
-      .includes(search.toLowerCase()),
+  const loaded = useMemo(
+    () => query.data?.pages.flatMap((page) => page.items) ?? [],
+    [query.data],
+  );
+  const items = useMemo(() => {
+    const needle = search.toLowerCase();
+    return loaded.filter((item) =>
+      `${item.reason} ${item.sql} ${item.requester.name}`
+        .toLowerCase()
+        .includes(needle),
+    );
+  }, [loaded, search]);
+  const clusterById = useMemo(
+    () => new Map(clusters.data?.items.map((c) => [c.id, c]) ?? []),
+    [clusters.data],
   );
   return (
     <>
@@ -101,6 +111,7 @@ export function ApprovalsPage() {
         {query.hasNextPage ? ' · More available' : ''}. Filter counts cover{' '}
         {counts.data?.items.length ?? '—'} loaded accessible requests. You
         cannot approve your own request.
+        {counts.error ? ' Filter counts are unavailable.' : ''}
       </p>
       <TabBar
         value={tab}
@@ -149,58 +160,51 @@ export function ApprovalsPage() {
               />
             ) : (
               <ul className="approval-inbox-list" aria-label="Approval inbox">
-                {items.map((approval) => (
-                  <li key={approval.id}>
-                    <button
-                      type="button"
-                      className="approval-inbox-item"
-                      aria-label="Review"
-                      aria-describedby={`request-${approval.id}`}
-                      aria-pressed={selected === approval.id}
-                      onClick={() => setSelected(approval.id)}
-                    >
-                      <span className="requester-avatar" aria-hidden="true">
-                        {approval.requester.name
-                          .split(' ')
-                          .map((part) => part[0])
-                          .join('')
-                          .slice(0, 2)}
-                      </span>
-                      <span>
-                        <strong id={`request-${approval.id}`}>
-                          {approval.reason}
-                        </strong>
-                        <small>
-                          {approval.requester.name} · {approval.cluster_name}
-                          {clusters.data?.items.find(
-                            (cluster) => cluster.id === approval.cluster_id,
-                          ) && (
-                            <>
-                              {' '}
-                              ·{' '}
-                              <EnvBadge
-                                environment={
-                                  clusters.data.items.find(
-                                    (cluster) =>
-                                      cluster.id === approval.cluster_id,
-                                  )!.environment
-                                }
-                              />
-                            </>
-                          )}
-                        </small>
-                        <small>
-                          <RelativeTime value={approval.created_at} /> ·{' '}
-                          <ExpiryTime value={approval.expires_at} />
-                        </small>
-                        <small>
-                          <ApprovalBadge status={approval.status} />
-                          {approval.error && <span>{approval.error}</span>}
-                        </small>
-                      </span>
-                    </button>
-                  </li>
-                ))}
+                {items.map((approval) => {
+                  const cluster = clusterById.get(approval.cluster_id);
+                  return (
+                    <li key={approval.id}>
+                      <button
+                        type="button"
+                        className="approval-inbox-item"
+                        aria-label="Review"
+                        aria-describedby={`request-${approval.id}`}
+                        aria-pressed={selected === approval.id}
+                        onClick={() => setSelected(approval.id)}
+                      >
+                        <span className="requester-avatar" aria-hidden="true">
+                          {approval.requester.name
+                            .split(' ')
+                            .map((part) => part[0])
+                            .join('')
+                            .slice(0, 2)}
+                        </span>
+                        <span>
+                          <strong id={`request-${approval.id}`}>
+                            {approval.reason}
+                          </strong>
+                          <small>
+                            {approval.requester.name} · {approval.cluster_name}
+                            {cluster && (
+                              <>
+                                {' '}
+                                · <EnvBadge environment={cluster.environment} />
+                              </>
+                            )}
+                          </small>
+                          <small>
+                            <RelativeTime value={approval.created_at} /> ·{' '}
+                            <ExpiryTime value={approval.expires_at} />
+                          </small>
+                          <small>
+                            <ApprovalBadge status={approval.status} />
+                            {approval.error && <span>{approval.error}</span>}
+                          </small>
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </div>
@@ -297,6 +301,18 @@ export function ApprovalBadge({ status }: { status: Approval['status'] }) {
     </Badge>
   );
 }
+function ExpiryNotice({ expiresAt }: { expiresAt: string }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  return (
+    <div className="approval-expiry" role="status">
+      {expiryLabel(expiresAt, now)} · {formatTime(expiresAt)}
+    </div>
+  );
+}
 function ApprovalDetail({
   id,
   note,
@@ -315,11 +331,18 @@ function ApprovalDetail({
       query.state.data?.status === 'executing' ? 2000 : false,
   });
   const user = useUser();
+  // Re-render once at the moment of expiry so review/execute controls are
+  // withdrawn on time; the visible countdown lives in <ExpiryNotice />.
   const [now, setNow] = useState(() => Date.now());
+  const expiresAt = approval.data?.expires_at;
   useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, []);
+    if (!expiresAt) return;
+    const delay = Date.parse(expiresAt) - Date.now();
+    setNow(Date.now());
+    if (!Number.isFinite(delay) || delay <= 0 || delay > 2_147_483_000) return;
+    const timer = setTimeout(() => setNow(Date.now()), delay + 20);
+    return () => clearTimeout(timer);
+  }, [expiresAt]);
   const [executeConfirm, setExecuteConfirm] = useState(false);
   const action = useAction<Approval>('Approval updated');
   const cluster = useResource<Cluster>(
@@ -359,9 +382,7 @@ function ApprovalDetail({
           <span className="muted">{data.requester.email}</span>
           <p>{data.reason}</p>
         </div>
-        <div className="approval-expiry" role="status">
-          {expiryLabel(data.expires_at, now)} · {formatTime(data.expires_at)}
-        </div>
+        <ExpiryNotice expiresAt={data.expires_at} />
         <Link to={`/approvals?id=${id}`}>Link to approval</Link>
         {data.error && (
           <div className="callout danger" role="alert">
@@ -452,7 +473,6 @@ function ApprovalDetail({
       </div>
       {(canReview || canExecute) && (
         <div className="approval-actions">
-          {' '}
           {canReview && (
             <>
               <Field

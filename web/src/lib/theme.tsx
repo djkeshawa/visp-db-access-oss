@@ -2,6 +2,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useMemo,
   useState,
   type ReactNode,
 } from 'react';
@@ -23,10 +24,14 @@ export const useTheme = () => useContext(ThemeContext);
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setTheme] = useState<Theme>(storedTheme),
     [system, setSystem] = useState<'light' | 'dark'>(() =>
-      matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
+      typeof matchMedia === 'function' &&
+      matchMedia('(prefers-color-scheme: dark)').matches
+        ? 'dark'
+        : 'light',
     );
   const resolved = theme === 'system' ? system : theme;
   useEffect(() => {
+    if (typeof matchMedia !== 'function') return;
     const media = matchMedia('(prefers-color-scheme: dark)');
     const update = () => setSystem(media.matches ? 'dark' : 'light');
     media.addEventListener('change', update);
@@ -40,9 +45,11 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       /* The selected theme still applies when storage is unavailable. */
     }
   }, [theme, resolved]);
+  const value = useMemo(
+    () => ({ theme, setTheme, resolved }),
+    [theme, resolved],
+  );
   return (
-    <ThemeContext.Provider value={{ theme, setTheme, resolved }}>
-      {children}
-    </ThemeContext.Provider>
+    <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>
   );
 }

@@ -459,10 +459,14 @@ pub(crate) async fn delete_grant(
             .await?;
     scope_admin(&state, &user, &scope, scope_id).await?;
     let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM grants WHERE id=$1")
+    let deleted = sqlx::query("DELETE FROM grants WHERE id=$1")
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    // A concurrent admin may have removed it after the scope lookup.
+    if deleted.rows_affected() == 0 {
+        return Err(ApiError::not_found());
+    }
     state
         .audit_change(&mut tx, &user, "grant.delete", Some(id), ip.0)
         .await?;
@@ -543,14 +547,62 @@ pub(crate) async fn overview(
     State(state): State<AppState>,
     Extension(user): Extension<User>,
 ) -> Result<Json<Value>, ApiError> {
-    let clusters =
-        crate::clusters::accessible(&state, &user, &crate::clusters::Filters::default()).await?;
+    let filters = crate::clusters::Filters::default();
+    let history_sql = format!(
+"SELECT count(*),count(*) FILTER(WHERE h.status='blocked'),count(*) FILTER(WHERE h.status='error')
+         FROM query_history h JOIN clusters c ON c.id=h.cluster_id JOIN users u ON u.id=$1 WHERE
+         h.created_at>now()-interval '24 hours' AND {}",
+rbac::ACCESS_SQL,
+    );
+    let pending_sql = format!(
+"SELECT count(*) FROM approvals a JOIN clusters c ON c.id=a.cluster_id JOIN users u ON u.id=$1 WHERE a.status='pending' AND a.expires_at>now() AND {}",
+rbac::ACCESS_SQL,
+    );
+    let page = db::Page {
+        limit: Some(10),
+        ..Default::default()
+    };
+    // The queries are independent, so run them concurrently.
+    let (clusters, (queries, blocked, errors), pending, recent, discovery): (
+        Vec<Value>,
+        (i64, i64, i64),
+        i64,
+        Value,
+        Value,
+    ) = futures::try_join!(
+        crate::clusters::accessible(&state, &user, &filters),
+        async {
+            Ok::<_, ApiError>(
+                sqlx::query_as(&history_sql)
+                    .bind(user.id)
+                    .fetch_one(&state.db)
+                    .await?,
+            )
+        },
+        async {
+            Ok::<_, ApiError>(
+                sqlx::query_scalar(&pending_sql)
+                    .bind(user.id)
+                    .fetch_one(&state.db)
+                    .await?,
+            )
+        },
+        crate::query::history_items(&state, &user, &page),
+        async {
+            if user.org_role == "admin" {
+                Ok::<_, ApiError>(sqlx::query_scalar("SELECT jsonb_build_object('new',count(*) FILTER(WHERE status='new'),'gone',count(*) FILTER(WHERE status='gone'),'drifted',count(*) FILTER(WHERE drift!='[]'::jsonb)) FROM discovered_resources").fetch_one(&state.db).await?)
+            } else {
+                Ok(Value::Null)
+            }
+        },
+    )?;
+    let clusters_total = clusters.len();
     let mut healthy = 0;
     let mut degraded = 0;
     let mut down = 0;
     let mut unknown = 0;
     let mut unhealthy = Vec::new();
-    for c in &clusters {
+    for c in clusters {
         match c
             .get("health")
             .and_then(|h| h.get("status"))
@@ -559,48 +611,18 @@ pub(crate) async fn overview(
             Some("healthy") => healthy += 1,
             Some("degraded") => {
                 degraded += 1;
-                unhealthy.push(c.clone());
+                unhealthy.push(c);
             }
             Some("down") => {
                 down += 1;
-                unhealthy.push(c.clone());
+                unhealthy.push(c);
             }
             _ => unknown += 1,
         }
     }
-    let sql = format!(
-"SELECT count(*),count(*) FILTER(WHERE h.status='blocked'),count(*) FILTER(WHERE h.status='error')
-         FROM query_history h JOIN clusters c ON c.id=h.cluster_id JOIN users u ON u.id=$1 WHERE
-         h.created_at>now()-interval '24 hours' AND {}",
-rbac::ACCESS_SQL,
-);
-    let (queries, blocked, errors): (i64, i64, i64) = sqlx::query_as(&sql)
-        .bind(user.id)
-        .fetch_one(&state.db)
-        .await?;
-    let pending:i64=sqlx::query_scalar(&format!(
-"SELECT count(*) FROM approvals a JOIN clusters c ON c.id=a.cluster_id JOIN users u ON u.id=$1 WHERE a.status='pending' AND a.expires_at>now() AND {}",
-rbac::ACCESS_SQL,
-))
-.bind(user.id)
-.fetch_one(&state.db).await?;
-    let recent = crate::query::history_items(
-        &state,
-        &user,
-        &db::Page {
-            limit: Some(10),
-            ..Default::default()
-        },
-    )
-    .await?;
-    let discovery: Value = if user.org_role == "admin" {
-        sqlx::query_scalar("SELECT jsonb_build_object('new',count(*) FILTER(WHERE status='new'),'gone',count(*) FILTER(WHERE status='gone'),'drifted',count(*) FILTER(WHERE drift!='[]'::jsonb)) FROM discovered_resources").fetch_one(&state.db).await?
-    } else {
-        Value::Null
-    };
     Ok(Json(json!({
         "discovery": discovery,
-        "clusters_total": clusters.len(),
+        "clusters_total": clusters_total,
         "healthy": healthy,
         "degraded": degraded,
         "down": down,
@@ -612,4 +634,33 @@ rbac::ACCESS_SQL,
         "recent_queries": recent.get("items"),
         "unhealthy_clusters": unhealthy,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn email_validation() {
+        assert!(validate_email("a@b.example").is_ok());
+        for bad in [
+            "",
+            "a",
+            "@b",
+            "a@",
+            "a@b@c",
+            "a b@c",
+            &format!("{}@x", "a".repeat(260)),
+        ] {
+            assert!(validate_email(bad).is_err(), "{bad}");
+        }
+    }
+    #[test]
+    fn name_and_role_validation() {
+        assert!(name("Ops").is_ok());
+        assert!(name("   ").is_err());
+        assert!(name(&"x".repeat(257)).is_err());
+        assert!(role("admin").is_ok());
+        assert!(role("member").is_ok());
+        assert!(role("owner").is_err());
+    }
 }

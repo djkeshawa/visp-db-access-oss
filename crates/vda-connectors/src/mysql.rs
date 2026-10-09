@@ -3,13 +3,10 @@ use crate::{
     cancel::{self, GuardedConnection},
     decode,
     limits::{self, Results},
-    tls, Column, ConnectionSpec, ConnectorError, ExecLimits, HealthReport, PoolOptions,
-    QueryResult,
+    tls, ConnectionSpec, ConnectorError, ExecLimits, HealthReport, PoolOptions, QueryResult,
 };
 use futures::TryStreamExt;
-use sqlx::{
-    mysql::MySqlPoolOptions, Column as _, Executor, MySqlConnection, MySqlPool, Row, TypeInfo,
-};
+use sqlx::{mysql::MySqlPoolOptions, Executor, MySqlConnection, MySqlPool, Row};
 use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::Instant,
@@ -155,9 +152,12 @@ pub(crate) async fn execute(
         connection.on_discard(move || {
             // Aborting/dropping the execution future must stop work server-side
             // too; SQLx graceful TLS close can otherwise hold the sole pool slot.
-            tokio::spawn(async move {
-                cancel::mysql(&cancel_pool, backend).await;
-            });
+            // Dropping outside a runtime (e.g. during shutdown) must not panic.
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    cancel::mysql(&cancel_pool, backend).await;
+                });
+            }
         });
         setup(&mut connection, limits, write_cap.is_some()).await?;
         let result = if let Some(cap) = write_cap {
@@ -212,27 +212,19 @@ async fn read(
     limits: &ExecLimits,
 ) -> Result<QueryResult, ConnectorError> {
     let mut results = Results::new(limits);
-    results.columns(
+    results.columns(decode::columns(
         connection
             .describe(sql)
             .await
             .map_err(cancel::error)?
-            .columns()
-            .iter()
-            .map(|column| Column {
-                name: column.name().to_owned(),
-                type_name: column.type_info().name().to_owned(),
-            })
-            .collect(),
-    );
+            .columns(),
+    ));
     let mut stream = sqlx::query(sql).persistent(false).fetch(&mut *connection);
     while let Some(row) = stream.try_next().await.map_err(cancel::error)? {
-        results.columns(decode::mysql_columns(&row));
-        if results.full() {
-            results.truncate();
-            break;
+        if results.needs_columns() {
+            results.columns(decode::mysql_columns(&row));
         }
-        if !results.push(decode::mysql(&row)) {
+        if !results.offer(|| decode::mysql(&row)) {
             break;
         }
     }

@@ -16,7 +16,10 @@ export function HealthPage({ cluster }: { cluster: Cluster }) {
   );
   const check = useAction('Health check completed');
   if (query.isPending) return <Skeleton />;
-  if (query.error) return <ErrorPanel error={query.error} />;
+  if (query.error)
+    return (
+      <ErrorPanel error={query.error} retry={() => void query.refetch()} />
+    );
   const { current, history } = query.data;
   const max = Math.max(10, ...history.map((h) => h.latency_ms ?? 0)) * 1.25;
   const paths: string[] = [];
@@ -74,7 +77,11 @@ export function HealthPage({ cluster }: { cluster: Cluster }) {
           </div>
         </div>
       </div>
-      {current.error && <div className="callout danger">{current.error}</div>}
+      {current.error && (
+        <div className="callout danger" role="alert">
+          {current.error}
+        </div>
+      )}
       <div className="chart-card">
         <h3>Connection latency</h3>
         <p className="muted">

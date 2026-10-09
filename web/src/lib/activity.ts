@@ -37,6 +37,12 @@ export function statementSummary(sql: string): string {
   ].map((match) => match[1]!.replace(/\s*\.\s*/g, '.'));
   return `${verb}${tables.length ? ` · ${[...new Set(tables)].join(', ')}` : ''}`;
 }
+const dayFormat = new Intl.DateTimeFormat('en', {
+  month: 'short',
+  day: 'numeric',
+  year: 'numeric',
+  timeZone: 'UTC',
+});
 /** UTC calendar grouping matches inDateRange rather than the browser's timezone. */
 export function dayLabel(value: string, now = new Date()): string {
   const day = value.slice(0, 10),
@@ -47,12 +53,7 @@ export function dayLabel(value: string, now = new Date()): string {
     ? 'Today'
     : day === yesterday.toISOString().slice(0, 10)
       ? 'Yesterday'
-      : new Intl.DateTimeFormat('en', {
-          month: 'short',
-          day: 'numeric',
-          year: 'numeric',
-          timeZone: 'UTC',
-        }).format(new Date(`${day}T12:00:00Z`));
+      : dayFormat.format(new Date(`${day}T12:00:00Z`));
 }
 export function datePreset(
   days: number,

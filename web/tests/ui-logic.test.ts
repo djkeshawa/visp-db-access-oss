@@ -107,3 +107,20 @@ it('shows live expiry and lossless SQL changes', () => {
       .join('\n'),
   ).toBe('SELECT id\nFROM users\nLIMIT 1001');
 });
+describe('sort and time helpers', () => {
+  it('sorts text naturally with nulls first and keeps mixed numbers stable', () => {
+    const rows = [['b10'], ['b2'], [null], ['a']];
+    expect(
+      fetchedRows(rows, '', { column: 0, direction: 'asc' }).map((r) => r[0]),
+    ).toEqual([null, 'a', 'b2', 'b10']);
+    expect(
+      fetchedRows(rows, '', { column: 0, direction: 'desc' }).map((r) => r[0]),
+    ).toEqual(['b10', 'b2', 'a', null]);
+  });
+  it('formats timestamps and tolerates invalid dates', async () => {
+    const { formatTime } = await import('../src/lib/utils');
+    expect(formatTime(null)).toBe('—');
+    expect(formatTime('not a date')).toBe('Invalid Date');
+    expect(formatTime('2026-10-05T10:00:00Z')).toContain('Oct');
+  });
+});

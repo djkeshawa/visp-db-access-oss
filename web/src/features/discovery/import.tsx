@@ -56,7 +56,9 @@ export function ImportResource({
     value: (typeof draft)[K],
   ) => {
     setDraft((draft) => ({ ...draft, [key]: value }));
-    test.reset();
+    // Only credentials and TLS settings invalidate a passed connection test.
+    if (['database', 'username', 'password', 'tls_mode'].includes(key))
+      test.reset();
   };
   const busy = test.isPending || save.isPending || createProject.isPending;
   const connectionValid =
@@ -78,6 +80,19 @@ export function ImportResource({
     connectionValid &&
     draft.name.trim() &&
     projectItems.some((p) => p.id === draft.project_id);
+  const createInlineProject = () => {
+    if (!newProject?.trim() || busy) return;
+    createProject.mutate(
+      { path: '/projects', body: { name: newProject.trim(), description: '' } },
+      {
+        onSuccess: (project) => {
+          setCreatedProject(project);
+          update('project_id', project.id);
+          setNewProject(null);
+        },
+      },
+    );
+  };
   return (
     <Modal
       open
@@ -109,7 +124,7 @@ export function ImportResource({
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          if (valid && tested)
+          if (valid && tested && !busy)
             save.mutate(
               {
                 path: `/discovery/resources/${resource.id}/import`,
@@ -163,25 +178,18 @@ export function ImportResource({
               <input
                 value={newProject}
                 onChange={(e) => setNewProject(e.target.value)}
+                onKeyDown={(e) => {
+                  // Enter here creates the project rather than submitting the import form.
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    createInlineProject();
+                  }
+                }}
               />
             </Field>
             <Button
               disabled={!newProject.trim() || busy}
-              onClick={() =>
-                createProject.mutate(
-                  {
-                    path: '/projects',
-                    body: { name: newProject.trim(), description: '' },
-                  },
-                  {
-                    onSuccess: (project) => {
-                      setCreatedProject(project);
-                      update('project_id', project.id);
-                      setNewProject(null);
-                    },
-                  },
-                )
-              }
+              onClick={createInlineProject}
             >
               Create project
             </Button>

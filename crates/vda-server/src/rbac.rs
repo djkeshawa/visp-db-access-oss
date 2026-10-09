@@ -60,14 +60,19 @@ pub async fn require_level(
     id: Uuid,
     level: AccessLevel,
 ) -> Result<ClusterRecord, ApiError> {
+    Ok(require_level_effective(pool, user, id, level).await?.0)
+}
+/// Like [`require_level`], but also returns the resolved level so callers need no second lookup.
+pub async fn require_level_effective(
+    pool: &sqlx::PgPool,
+    user: &User,
+    id: Uuid,
+    level: AccessLevel,
+) -> Result<(ClusterRecord, AccessLevel), ApiError> {
     let cluster = crate::db::cluster(pool, id).await?;
-    if effective(pool, user, &cluster)
-        .await?
-        .is_some_and(|v| v >= level)
-    {
-        Ok(cluster)
-    } else {
-        Err(ApiError::forbidden())
+    match effective(pool, user, &cluster).await? {
+        Some(effective) if effective >= level => Ok((cluster, effective)),
+        _ => Err(ApiError::forbidden()),
     }
 }
 /// Authorization predicate used by scoped list queries.

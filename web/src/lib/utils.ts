@@ -1,16 +1,31 @@
 import { readPreferences } from './preferences';
 import { ApiError } from '../api/errors';
-export const formatTime = (value: string | null) =>
-  value
-    ? new Date(value).toLocaleString(undefined, {
-        timeZone: readPreferences().timezone === 'utc' ? 'UTC' : undefined,
-        timeZoneName: 'short',
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      })
-    : '—';
+const timeFormats = new Map<string, Intl.DateTimeFormat>();
+/** Intl formatters are costly to build; result grids format many timestamps. */
+function timeFormat(utc: boolean): Intl.DateTimeFormat {
+  const key = utc ? 'utc' : 'local';
+  let format = timeFormats.get(key);
+  if (!format) {
+    format = new Intl.DateTimeFormat(undefined, {
+      timeZone: utc ? 'UTC' : undefined,
+      timeZoneName: 'short',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    timeFormats.set(key, format);
+  }
+  return format;
+}
+export const formatTime = (value: string | null) => {
+  if (!value) return '—';
+  const date = new Date(value);
+  // Intl.DateTimeFormat#format throws on invalid dates, unlike toLocaleString.
+  return Number.isNaN(date.getTime())
+    ? 'Invalid Date'
+    : timeFormat(readPreferences().timezone === 'utc').format(date);
+};
 export function message(error: unknown): string {
   if (
     error instanceof ApiError &&

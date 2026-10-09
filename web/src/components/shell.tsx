@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import * as Dropdown from '@radix-ui/react-dropdown-menu';
@@ -32,7 +32,7 @@ import { BrandMark } from './ui/brand';
 import { CommandPalette } from './command-palette';
 import { SessionRecovery } from './session-recovery';
 import { PopoverLayerContext } from '../lib/popover-layer';
-import { Button, Field, Modal, Picker, RouteBoundary } from './ui';
+import { Button, Field, Modal, Picker, RouteBoundary, Skeleton } from './ui';
 const navigation = [
   { to: '/overview', text: 'Overview', icon: Activity },
   { to: '/clusters', text: 'Clusters', icon: Database },
@@ -46,6 +46,7 @@ const administration = [
   { to: '/audit', text: 'Audit log', icon: ScrollText },
   { to: '/settings', text: 'Settings', icon: Settings },
 ];
+const noClusters: Cluster[] = [];
 export function Shell() {
   const cache = useQueryClient();
   const [popoverLayer, setPopoverLayer] = useState<HTMLElement | null>(null);
@@ -66,9 +67,21 @@ export function Shell() {
   );
   const canManageAccess =
     user?.org_role === 'admin' || grantDirectory.isSuccess;
-  const adminLinks = administration.filter(
-    (item) =>
-      user?.org_role === 'admin' || (item.to === '/access' && canManageAccess),
+  const isAdmin = user?.org_role === 'admin';
+  const adminLinks = useMemo(
+    () =>
+      administration.filter(
+        (item) => isAdmin || (item.to === '/access' && canManageAccess),
+      ),
+    [isAdmin, canManageAccess],
+  );
+  const palettePages = useMemo(
+    () => [
+      ...navigation,
+      ...adminLinks,
+      ...(isAdmin ? [] : [{ to: '/settings', text: 'Settings' }]),
+    ],
+    [adminLinks, isAdmin],
   );
   const overview = useResource<{ pending_approvals: number }>('/overview');
   const [project, setProject] = useState('all');
@@ -84,7 +97,7 @@ export function Shell() {
         event.key === '?' &&
         !(
           event.target instanceof HTMLElement &&
-          (event.target.matches('input,textarea') ||
+          (event.target.matches('input,textarea,select') ||
             event.target.isContentEditable)
         )
       ) {
@@ -241,7 +254,7 @@ export function Shell() {
                       navigate(
                         value === 'all'
                           ? '/clusters'
-                          : `/clusters?project_id=${value}`,
+                          : `/clusters?project_id=${encodeURIComponent(value)}`,
                       );
                     }}
                     label="Project"
@@ -342,7 +355,16 @@ export function Shell() {
             tabIndex={-1}
           >
             <RouteBoundary key={location.pathname}>
-              <Outlet />
+              <Suspense
+                fallback={
+                  <>
+                    <h1>Loading workspace</h1>
+                    <Skeleton />
+                  </>
+                }
+              >
+                <Outlet />
+              </Suspense>
             </RouteBoundary>
           </main>
         </div>
@@ -356,14 +378,8 @@ export function Shell() {
         <CommandPalette
           open={command}
           onOpenChange={setCommand}
-          pages={[
-            ...navigation,
-            ...adminLinks,
-            ...(user?.org_role !== 'admin'
-              ? [{ to: '/settings', text: 'Settings' }]
-              : []),
-          ]}
-          clusters={clusters.data?.items ?? []}
+          pages={palettePages}
+          clusters={clusters.data?.items ?? noClusters}
         />
         <Modal
           open={shortcuts}

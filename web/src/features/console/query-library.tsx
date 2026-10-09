@@ -1,5 +1,5 @@
 import { History, Bookmark, BookmarkPlus } from 'lucide-react';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { params, request } from '../../api/client';
 import type { HistoryEntry, Page } from '../../api/types';
@@ -77,21 +77,28 @@ export function QueryLibrary({
       return false;
     }
   };
-  const entries =
-    mode === 'history'
-      ? (history.data?.pages.flatMap((page) => page.items) ?? []).map(
-          (item) => ({
+  const historyPages = history.data?.pages;
+  // The list is only shown in the drawer, so skip the work while it is closed
+  // (this component re-renders on every editor keystroke through `sql`).
+  const filtered = useMemo(() => {
+    if (!mode) return [];
+    const entries =
+      mode === 'history'
+        ? (historyPages?.flatMap((page) => page.items) ?? []).map((item) => ({
             id: item.id,
             name: `${item.status} · ${formatTime(item.created_at)}`,
             sql: item.sql,
-          }),
-        )
-      : favorites;
-  const filtered = entries.filter((item) =>
-    `${item.name} ${item.sql}`
-      .toLocaleLowerCase()
-      .includes(search.toLocaleLowerCase()),
-  );
+          }))
+        : favorites;
+    const needle = search.toLocaleLowerCase();
+    return entries.filter((item) =>
+      `${item.name} ${item.sql}`.toLocaleLowerCase().includes(needle),
+    );
+  }, [mode, historyPages, favorites, search]);
+  const toggleMode = (next: 'history' | 'favorites') => {
+    setSearch('');
+    setMode((value) => (value === next ? null : next));
+  };
   return (
     <>
       <div className="query-library-toolbar">
@@ -100,9 +107,7 @@ export function QueryLibrary({
             className="icon"
             aria-label="History"
             aria-expanded={mode === 'history'}
-            onClick={() =>
-              setMode((value) => (value === 'history' ? null : 'history'))
-            }
+            onClick={() => toggleMode('history')}
           >
             <History size={16} />
           </Button>
@@ -112,9 +117,7 @@ export function QueryLibrary({
             className="icon"
             aria-label={`Favorites (${favorites.length})`}
             aria-expanded={mode === 'favorites'}
-            onClick={() =>
-              setMode((value) => (value === 'favorites' ? null : 'favorites'))
-            }
+            onClick={() => toggleMode('favorites')}
           >
             <Bookmark size={16} />
           </Button>
@@ -228,13 +231,16 @@ export function QueryLibrary({
         <form
           onSubmit={(event) => {
             event.preventDefault();
-            const data = new FormData(event.currentTarget);
+            const name = String(
+              new FormData(event.currentTarget).get('name'),
+            ).trim();
+            if (!name) return;
             if (
               save([
                 ...favorites,
                 {
                   id: crypto.randomUUID(),
-                  name: String(data.get('name')).trim(),
+                  name,
                   sql,
                 },
               ])

@@ -40,7 +40,8 @@ pub fn client_ip(
     trust: bool,
     proxies: &[IpNet],
 ) -> Result<IpAddr, ApiError> {
-    if !trust || (!proxies.is_empty() && !proxies.iter().any(|n| n.contains(&peer))) {
+    // Fail closed: with no configured trusted proxies only the direct peer is trusted.
+    if !trust || !proxies.iter().any(|n| n.contains(&peer)) {
         return Ok(peer);
     }
     let Some(value) = forwarded else {

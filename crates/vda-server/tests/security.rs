@@ -276,7 +276,8 @@ fn multi_line_forwarded_headers_use_the_rightmost_untrusted_hop() {
             &[]
         )
         .unwrap(),
-        ip
+        "10.1.1.1".parse::<IpAddr>().unwrap(),
+        "an empty trusted proxy list must not honour X-Forwarded-For"
     );
 }
 
@@ -343,4 +344,151 @@ fn masked_serialization_is_denied_but_wildcard_columns_survive() {
         );
         assert_ne!(a.verdict, Verdict::Deny, "{sql}: {:?}", a.issues);
     }
+}
+
+#[test]
+fn masked_columns_cannot_be_renamed_or_derived_to_escape_masking() {
+    use vda_guard::{analyze, Dialect, Verdict};
+    let run = |sql: &str| {
+        let mut a = analyze(
+            sql,
+            Dialect::Postgres,
+            AccessLevel::Read,
+            &Policy::for_environment("development").guard(),
+        );
+        vda_server::masking::harden_analysis(
+            &mut a,
+            &["users.email".into()],
+            sql,
+            Dialect::Postgres,
+        );
+        a
+    };
+    for sql in [
+        "SELECT email AS contact FROM users",
+        "SELECT u.email AS contact FROM users u",
+        "SELECT lower(email) FROM users",
+        "SELECT email || 'x' FROM users",
+        "SELECT (SELECT email FROM users LIMIT 1) AS x",
+        "SELECT x FROM (SELECT email AS x FROM users) t",
+        "WITH t AS (SELECT email AS x FROM users) SELECT x FROM t",
+        "WITH t(x) AS (SELECT email FROM users) SELECT x FROM t",
+        "SELECT x FROM users AS u(id, x)",
+        "SELECT 'a' AS label UNION ALL SELECT email FROM users",
+    ] {
+        let a = run(sql);
+        assert_eq!(a.verdict, Verdict::Deny, "{sql}");
+        assert!(
+            a.issues
+                .iter()
+                .any(|i| i.code == "masked_data_transformation"),
+            "{sql}"
+        );
+    }
+    for sql in [
+        "SELECT email FROM users",
+        "SELECT u.email FROM users u",
+        "SELECT email AS email FROM users",
+        "SELECT lower(email) AS email FROM users",
+        "SELECT email FROM users UNION ALL SELECT email FROM users",
+        "SELECT id, lower(name) AS n FROM users WHERE lower(email) = 'a' ORDER BY id",
+        "SELECT count(*) FROM users",
+        // PostgreSQL keeps the column name through casts, so masking by name still applies.
+        "SELECT email::integer FROM users",
+        "SELECT CAST(email AS text) FROM users",
+    ] {
+        let a = run(sql);
+        assert_ne!(a.verdict, Verdict::Deny, "{sql}: {:?}", a.issues);
+    }
+}
+
+#[test]
+fn masked_columns_cannot_escape_through_dml_returning() {
+    use vda_guard::{analyze, Dialect, Verdict};
+    let run = |sql: &str| {
+        let mut a = analyze(
+            sql,
+            Dialect::Postgres,
+            AccessLevel::Write,
+            &Policy::for_environment("development").guard(),
+        );
+        vda_server::masking::harden_analysis(
+            &mut a,
+            &["users.email".into()],
+            sql,
+            Dialect::Postgres,
+        );
+        a
+    };
+    let masked_issue =
+        |a: &vda_guard::Analysis, code: &str| a.issues.iter().any(|i| i.code == code);
+    for (sql, code) in [
+        (
+            "UPDATE users SET name = 'x' WHERE id = 1 RETURNING email AS contact",
+            "masked_data_transformation",
+        ),
+        (
+            "INSERT INTO users (name) VALUES ('x') RETURNING lower(email)",
+            "masked_data_transformation",
+        ),
+        (
+            "DELETE FROM users WHERE id = 1 RETURNING email AS c",
+            "masked_data_transformation",
+        ),
+        (
+            "DELETE FROM users WHERE id = 1 RETURNING id, email || '' AS e",
+            "masked_data_transformation",
+        ),
+        (
+            "WITH d AS (DELETE FROM users WHERE id = 1 RETURNING email AS e) SELECT e FROM d",
+            "masked_data_transformation",
+        ),
+        (
+            "DELETE FROM users WHERE id = 1 RETURNING users",
+            "masked_data_serialization",
+        ),
+        (
+            "UPDATE users AS u SET name = 'x' WHERE id = 1 RETURNING u",
+            "masked_data_serialization",
+        ),
+        (
+            "INSERT INTO users (name) VALUES ('x') RETURNING users",
+            "masked_data_serialization",
+        ),
+        (
+            "DELETE FROM users WHERE id = 1 RETURNING (id, email)",
+            "masked_data_serialization",
+        ),
+    ] {
+        let a = run(sql);
+        assert_eq!(a.verdict, Verdict::Deny, "{sql}: {:?}", a.issues);
+        assert!(
+            masked_issue(&a, code),
+            "{sql} should report {code}: {:?}",
+            a.issues
+        );
+    }
+    for sql in [
+        "UPDATE users SET name = 'x' WHERE id = 1 RETURNING id, email",
+        "UPDATE users SET name = 'x' WHERE id = 1 RETURNING lower(email) AS email",
+        "DELETE FROM users WHERE id = 1 RETURNING *",
+        "INSERT INTO users (name) VALUES ('x') RETURNING id",
+    ] {
+        let a = run(sql);
+        assert!(
+            !masked_issue(&a, "masked_data_transformation")
+                && !masked_issue(&a, "masked_data_serialization"),
+            "{sql}: {:?}",
+            a.issues
+        );
+    }
+}
+
+#[test]
+fn empty_trusted_proxy_list_never_trusts_forwarded_for() {
+    let peer: IpAddr = "203.0.113.10".parse().unwrap();
+    assert_eq!(
+        client_ip(peer, Some("198.51.100.7"), true, &[]).unwrap(),
+        peer
+    );
 }

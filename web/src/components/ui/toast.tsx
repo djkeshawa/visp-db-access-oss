@@ -2,6 +2,8 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -15,14 +17,25 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<
     { id: string; text: string; tone: 'success' | 'error' }[]
   >([]);
+  const sequence = useRef(0);
+  const timers = useRef(new Set<ReturnType<typeof setTimeout>>());
+  useEffect(() => {
+    const pending = timers.current;
+    return () => {
+      pending.forEach(clearTimeout);
+      pending.clear();
+    };
+  }, []);
   const toast = useCallback(
     (text: string, tone: 'success' | 'error' = 'success') => {
-      const id = crypto.randomUUID();
+      // crypto.randomUUID() throws outside secure contexts (plain http on a LAN).
+      const id = String(++sequence.current);
       setItems((items) => [...items, { id, text, tone }]);
-      setTimeout(
-        () => setItems((items) => items.filter((item) => item.id !== id)),
-        6000,
-      );
+      const timer = setTimeout(() => {
+        timers.current.delete(timer);
+        setItems((items) => items.filter((item) => item.id !== id));
+      }, 6000);
+      timers.current.add(timer);
     },
     [],
   );

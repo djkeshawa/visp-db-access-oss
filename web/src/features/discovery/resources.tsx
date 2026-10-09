@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Cloud, Database, Layers, Search, AlertTriangle } from 'lucide-react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
@@ -27,6 +27,16 @@ import { useDiscoveryPages } from './queries';
 import { ImportResource } from './import';
 import { ReviewDrift } from './drift';
 
+const allRegions = groupRegions().flatMap((group) => group.regions);
+/** Lags a fast-changing value so search typing does not query on every keystroke. */
+function useDebounced<T>(value: T, delay = 300) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+  return debounced;
+}
 function ResourceFlags({ resource }: { resource: DiscoveredResource }) {
   return (
     <div className="discovery-chips">
@@ -48,15 +58,7 @@ function ResourceStatusBadge({ resource }: { resource: DiscoveredResource }) {
   const badge = (
     <Badge
       variant="status"
-      tone={
-        resource.status === 'new'
-          ? 'neutral'
-          : resource.status === 'gone'
-            ? 'warning'
-            : resource.status === 'imported'
-              ? 'neutral'
-              : 'neutral'
-      }
+      tone={resource.status === 'gone' ? 'warning' : 'neutral'}
     >
       {resource.status}
     </Badge>
@@ -80,10 +82,11 @@ export function DiscoveredResources() {
   });
   const set = (key: keyof typeof filters, value: string) =>
     setFilters((filters) => ({ ...filters, [key]: value }));
-  const path = `/discovery/resources${params({ ...Object.fromEntries(Object.entries(filters).map(([key, value]) => [key, value === 'all' ? '' : value])), limit: 20 })}`;
+  const debouncedQ = useDebounced(filters.q.trim());
+  const q = filters.q.trim() ? debouncedQ : '';
+  const path = `/discovery/resources${params({ ...Object.fromEntries(Object.entries({ ...filters, q }).map(([key, value]) => [key, value === 'all' ? '' : value])), limit: 20 })}`;
   const query = useDiscoveryPages<DiscoveredResource, ResourcePage>(path);
   const counts = query.data?.pages[0]?.counts;
-  const regions = groupRegions().flatMap((group) => group.regions);
   return (
     <>
       <div className="overview-strip">
@@ -146,7 +149,7 @@ export function DiscoveredResources() {
           onChange={(value) => set('region', value)}
           options={[
             { value: 'all', label: 'All regions' },
-            ...regions.map((region) => ({
+            ...allRegions.map((region) => ({
               value: region.code,
               label: region.code,
             })),
@@ -220,14 +223,27 @@ function ResourceResults({
   const action = useAction('Resource updated');
   const cache = useQueryClient(),
     toast = useToast();
+  const selectable = useMemo(
+    () =>
+      items
+        .filter((resource) => resource.status === 'new')
+        .map((resource) => resource.id),
+    [items],
+  );
+  // Rows that refetched into another status can no longer be bulk-ignored.
+  const chosen = useMemo(() => {
+    const available = new Set(selectable);
+    return selected.filter((id) => available.has(id));
+  }, [selectable, selected]);
+  const chosenSet = useMemo(() => new Set(chosen), [chosen]);
   const bulk = useMutation({
     mutationFn: async () => {
       const results = await Promise.allSettled(
-        selected.map((id) =>
+        chosen.map((id) =>
           request(`/discovery/resources/${id}/ignore`, json('POST')),
         ),
       );
-      const failed = selected.filter(
+      const failed = chosen.filter(
         (_, index) => results[index]?.status === 'rejected',
       );
       const firstError = results.find((result) => result.status === 'rejected');
@@ -235,16 +251,17 @@ function ResourceResults({
     },
     onSuccess: ({ failed, firstError, succeeded }) => {
       setSelected(failed);
-      void cache.invalidateQueries();
+      void cache.invalidateQueries({
+        predicate: ({ queryKey }) =>
+          typeof queryKey[1] === 'string' &&
+          queryKey[1].startsWith('/discovery'),
+      });
       if (succeeded) toast(`${succeeded} resources ignored`);
       if (firstError?.status === 'rejected')
         toast(message(firstError.reason), 'error');
     },
     onError: (error) => toast(message(error), 'error'),
   });
-  const selectable = items
-    .filter((resource) => resource.status === 'new')
-    .map((resource) => resource.id);
   const toggle = (id: string) =>
     setSelected((ids) =>
       ids.includes(id) ? ids.filter((value) => value !== id) : [...ids, id],
@@ -263,9 +280,9 @@ function ResourceResults({
     );
   return (
     <>
-      {selected.length > 0 && (
+      {chosen.length > 0 && (
         <div className="discovery-bulk">
-          <span>{selected.length} selected</span>
+          <span role="status">{chosen.length} selected</span>
           <Button
             disabled={bulk.isPending || action.isPending}
             onClick={() => bulk.mutate()}
@@ -288,7 +305,7 @@ function ResourceResults({
                   disabled={!selectable.length || bulk.isPending}
                   checked={
                     !!selectable.length &&
-                    selectable.every((id) => selected.includes(id))
+                    selectable.every((id) => chosenSet.has(id))
                   }
                   onChange={(e) =>
                     setSelected(e.target.checked ? selectable : [])
@@ -311,7 +328,7 @@ function ResourceResults({
                     <input
                       type="checkbox"
                       aria-label={`Select ${resource.identifier}`}
-                      checked={selected.includes(resource.id)}
+                      checked={chosenSet.has(resource.id)}
                       disabled={bulk.isPending}
                       onChange={() => toggle(resource.id)}
                     />

@@ -1,20 +1,24 @@
+import { memo } from 'react';
 import {
   ShieldCheck,
   ShieldAlert,
   ShieldX,
   Info,
   AlertTriangle,
+  Lightbulb,
 } from 'lucide-react';
-import type { Analysis } from '../../api/types';
+import type { Analysis, Fix, Suggestion } from '../../api/types';
 import { Link } from 'react-router-dom';
-import { ErrorPanel } from '../../components/ui';
-export function SafetyPanel({
+import { Button, ErrorPanel } from '../../components/ui';
+export const SafetyPanel = memo(function SafetyPanel({
   analysis,
   pending = false,
   error,
   maxRows,
   clusterId,
   retry,
+  suggestions,
+  onApplyFix,
 }: {
   analysis?: Analysis;
   pending?: boolean;
@@ -22,8 +26,16 @@ export function SafetyPanel({
   maxRows?: number;
   clusterId?: string;
   retry?: () => void;
+  /** Defaults to the analysis' own suggestions. */
+  suggestions?: Suggestion[];
+  /** Enables fix buttons; omitted where SQL cannot be edited (e.g. approvals). */
+  onApplyFix?: (fix: Fix) => void;
 }) {
   const verdict = analysis?.verdict;
+  const hints =
+    verdict === 'deny' ? [] : (suggestions ?? analysis?.suggestions ?? []);
+  // Keep the last verdict on screen while re-analyzing so typing never flickers.
+  const analyzing = pending && !analysis;
   const Icon =
     verdict === 'allow'
       ? ShieldCheck
@@ -37,11 +49,7 @@ export function SafetyPanel({
         ? 'warning'
         : 'danger';
   return (
-    <section
-      className="safety-panel"
-      aria-label="SQL safety analysis"
-      aria-live="polite"
-    >
+    <section className="safety-panel" aria-label="SQL safety analysis">
       <div className="section-toolbar">
         <strong>Safety check</strong>
         {clusterId ? (
@@ -54,10 +62,14 @@ export function SafetyPanel({
         <ErrorPanel error={error} retry={retry} />
       ) : (
         <>
-          <div className={`verdict ${pending ? 'neutral' : tone}`}>
+          <div
+            className={`verdict ${analyzing ? 'neutral' : tone}`}
+            aria-live="polite"
+            aria-busy={pending}
+          >
             <Icon size={21} />
             <strong>
-              {pending
+              {analyzing
                 ? 'Analyzing…'
                 : verdict === 'allow'
                   ? 'Safe to run'
@@ -67,6 +79,9 @@ export function SafetyPanel({
                       ? 'Blocked'
                       : 'Waiting for SQL'}
             </strong>
+            {pending && analysis && (
+              <small className="verdict-updating">Updating…</small>
+            )}
           </div>
           {analysis && (
             <>
@@ -121,6 +136,36 @@ export function SafetyPanel({
                   </div>
                 ))}
               </div>
+              {hints.length > 0 && (
+                <div
+                  className="suggestions"
+                  aria-label="Optimization suggestions"
+                >
+                  <strong>Optimizations</strong>
+                  {hints.map((hint) => (
+                    <div className="suggestion" key={hint.code}>
+                      <Lightbulb size={15} aria-hidden="true" />
+                      <span>
+                        {hint.message}
+                        {hint.fix && onApplyFix && (
+                          <Button
+                            size="small"
+                            disabled={pending}
+                            title={
+                              hint.fix.action === 'new_tab'
+                                ? 'Opens in a new tab'
+                                : 'Replaces the editor text (undo with Ctrl/Cmd+Z)'
+                            }
+                            onClick={() => hint.fix && onApplyFix(hint.fix)}
+                          >
+                            {hint.fix.label}
+                          </Button>
+                        )}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
               <dl className="analysis-facts">
                 <dt>Statement</dt>
                 <dd>
@@ -170,7 +215,7 @@ export function SafetyPanel({
       )}
     </section>
   );
-}
+});
 
 function issueHelp(code: string): string {
   const hints: Record<string, string> = {

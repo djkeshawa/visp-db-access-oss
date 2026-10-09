@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import * as Dropdown from '@radix-ui/react-dropdown-menu';
 import { Copy, Download, LockKeyhole, MoreHorizontal } from 'lucide-react';
@@ -15,11 +15,280 @@ import {
   type CopyFormat,
   type RowSort,
 } from '../../lib/result-view';
-/** Virtualized, keyboard-accessible interaction with the fetched result snapshot. */
-export function Results({ result }: { result: QueryResult }) {
+type Column = QueryResult['columns'][number];
+type VisibleColumn = { column: Column; index: number };
+const MIN_WIDTH = 90,
+  MAX_WIDTH = 1000,
+  ROW_NUMBER_WIDTH = 46;
+const clampWidth = (value: number) =>
+  Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, value));
+const cursorOffsets: Record<string, [number, number]> = {
+  ArrowRight: [0, 1],
+  ArrowLeft: [0, -1],
+  ArrowDown: [1, 0],
+  ArrowUp: [-1, 0],
+};
+/** Header cell; memoized so filtering and cell focus do not rebuild every menu. */
+const ColumnHeader = memo(function ColumnHeader({
+  column,
+  index,
+  position,
+  width,
+  left,
+  direction,
+  onSort,
+  onCopyColumn,
+  onHide,
+  onTogglePin,
+  onResize,
+}: {
+  column: Column;
+  index: number;
+  position: number;
+  width: number;
+  /** Sticky offset when the column is pinned. */
+  left: number | undefined;
+  direction: 'asc' | 'desc' | null;
+  onSort: (index: number, direction: 'asc' | 'desc') => void;
+  onCopyColumn: (index: number) => void;
+  onHide: (index: number) => void;
+  onTogglePin: (index: number) => void;
+  onResize: (index: number, width: number) => void;
+}) {
   const popoverLayer = usePopoverLayer();
+  const pinned = left !== undefined;
+  const endResize = useRef<(() => void) | null>(null);
+  // A drag must not leak listeners if the header unmounts mid-drag.
+  useEffect(() => () => endResize.current?.(), []);
+  return (
+    <div
+      role="columnheader"
+      aria-label={column.name}
+      aria-colindex={position + 2}
+      aria-sort={
+        direction ? (direction === 'asc' ? 'ascending' : 'descending') : 'none'
+      }
+      className={`result-column ${pinned ? 'pinned-column' : ''}`}
+      style={pinned ? { left } : undefined}
+    >
+      <span>
+        {column.masked && <LockKeyhole size={12} />} {column.name}
+        {direction && (
+          <span aria-hidden="true">{direction === 'asc' ? '↑' : '↓'}</span>
+        )}
+        <Dropdown.Root modal={false}>
+          <Dropdown.Trigger asChild>
+            <button
+              className="column-menu"
+              aria-label={`Column options for ${column.name}`}
+            >
+              <MoreHorizontal size={14} />
+            </button>
+          </Dropdown.Trigger>
+          <Dropdown.Portal container={popoverLayer}>
+            <Dropdown.Content className="dropdown">
+              <Dropdown.Item onSelect={() => onSort(index, 'asc')}>
+                Sort ascending
+              </Dropdown.Item>
+              <Dropdown.Item onSelect={() => onSort(index, 'desc')}>
+                Sort descending
+              </Dropdown.Item>
+              <Dropdown.Item onSelect={() => onCopyColumn(index)}>
+                Copy column
+              </Dropdown.Item>
+              <Dropdown.Item onSelect={() => onHide(index)}>
+                Hide column
+              </Dropdown.Item>
+              <Dropdown.Item onSelect={() => onTogglePin(index)}>
+                {pinned ? 'Unpin' : 'Pin'} column
+              </Dropdown.Item>
+            </Dropdown.Content>
+          </Dropdown.Portal>
+        </Dropdown.Root>
+      </span>
+      <small>
+        {column.type_name}
+        {column.masked ? ' · masked' : ''}
+      </small>
+      <div
+        className="resize-handle"
+        role="separator"
+        aria-label={`Resize ${column.name}`}
+        aria-orientation="vertical"
+        aria-valuenow={width}
+        aria-valuemin={MIN_WIDTH}
+        aria-valuemax={MAX_WIDTH}
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+            event.preventDefault();
+            onResize(
+              index,
+              clampWidth(width + (event.key === 'ArrowRight' ? 20 : -20)),
+            );
+          }
+        }}
+        onPointerDown={(event) => {
+          endResize.current?.();
+          const element = event.currentTarget;
+          try {
+            element.setPointerCapture(event.pointerId);
+          } catch {
+            // Capture is best effort; dragging still works while over the handle.
+          }
+          const start = event.clientX,
+            initial = width;
+          const move = (event: PointerEvent) =>
+            onResize(index, clampWidth(initial + event.clientX - start));
+          const end = () => {
+            element.removeEventListener('pointermove', move);
+            element.removeEventListener('pointerup', end);
+            element.removeEventListener('pointercancel', end);
+            element.removeEventListener('lostpointercapture', end);
+            endResize.current = null;
+          };
+          element.addEventListener('pointermove', move);
+          element.addEventListener('pointerup', end);
+          element.addEventListener('pointercancel', end);
+          element.addEventListener('lostpointercapture', end);
+          endResize.current = end;
+        }}
+      />
+    </div>
+  );
+});
+/** One virtualized row; memoized so cell focus changes touch only two rows. */
+const ResultRow = memo(function ResultRow({
+  rowIndex,
+  start,
+  size,
+  row,
+  lastRow,
+  visible,
+  lefts,
+  template,
+  totalWidth,
+  focusColumn,
+  onCopyRow,
+  onCopyCell,
+  onInspect,
+  onFocusCell,
+  onMove,
+}: {
+  rowIndex: number;
+  start: number;
+  size: number;
+  row: unknown[] | undefined;
+  lastRow: number;
+  visible: VisibleColumn[];
+  lefts: Record<number, number | undefined>;
+  template: string;
+  totalWidth: number;
+  /** Position of the roving-tabindex cell in this row, or -1. */
+  focusColumn: number;
+  onCopyRow: (row: number) => void;
+  onCopyCell: (value: unknown) => void;
+  onInspect: (row: number, column: number) => void;
+  onFocusCell: (row: number, column: number) => void;
+  onMove: (row: number, column: number) => void;
+}) {
+  return (
+    <div
+      className="result-row"
+      role="row"
+      aria-rowindex={rowIndex + 2}
+      style={{
+        position: 'absolute',
+        top: start,
+        height: size,
+        gridTemplateColumns: template,
+        width: totalWidth,
+      }}
+    >
+      <Tip text="Copy row as TSV">
+        <button
+          role="gridcell"
+          className="row-number pinned-column"
+          style={{ left: 0 }}
+          aria-colindex={1}
+          aria-label={`Copy row ${rowIndex + 1}`}
+          tabIndex={-1}
+          onClick={() => onCopyRow(rowIndex)}
+        >
+          {rowIndex + 1}
+        </button>
+      </Tip>
+      {visible.map(({ column, index }, position) => {
+        const value = row?.[index];
+        const cell = presentCell(value, column);
+        const left = lefts[index];
+        return (
+          <div
+            role="gridcell"
+            key={index}
+            aria-colindex={position + 2}
+            className={`result-cell cell-${cell.kind} ${value === null ? 'null' : ''} ${left !== undefined ? 'pinned-column' : ''}`}
+            style={left !== undefined ? { left } : undefined}
+          >
+            <button
+              className="cell-value"
+              data-cell={`${rowIndex}-${position}`}
+              tabIndex={focusColumn === position ? 0 : -1}
+              title={cell.raw}
+              onFocus={() => onFocusCell(rowIndex, position)}
+              onClick={() => onInspect(rowIndex, position)}
+              onKeyDown={(event) => {
+                const offset = cursorOffsets[event.key];
+                if (offset) {
+                  event.preventDefault();
+                  onMove(rowIndex + offset[0], position + offset[1]);
+                } else if (event.key === 'Home' || event.key === 'End') {
+                  event.preventDefault();
+                  onMove(
+                    event.ctrlKey
+                      ? event.key === 'Home'
+                        ? 0
+                        : lastRow
+                      : rowIndex,
+                    event.key === 'Home' ? 0 : visible.length - 1,
+                  );
+                } else if (
+                  (event.ctrlKey || event.metaKey) &&
+                  event.key.toLowerCase() === 'c' &&
+                  !window.getSelection()?.toString()
+                ) {
+                  // The per-cell copy button is pointer-only, so mirror it here.
+                  onCopyCell(value);
+                }
+              }}
+            >
+              <span className={cell.kind === 'json' ? 'json-chip' : undefined}>
+                {cell.text}
+              </span>
+            </button>
+            <button
+              className="cell-copy"
+              tabIndex={-1}
+              aria-label={`Copy ${column.name} row ${rowIndex + 1}`}
+              onClick={() => onCopyCell(value)}
+            >
+              <Copy size={12} />
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+});
+/** Virtualized, keyboard-accessible interaction with the fetched result snapshot. */
+export const Results = memo(function Results({
+  result,
+}: {
+  result: QueryResult;
+}) {
   const scroll = useRef<HTMLDivElement>(null),
     toast = useToast();
+  const popoverLayer = usePopoverLayer();
   const [filter, setFilter] = useState(''),
     [sort, setSort] = useState<RowSort>(null),
     [hidden, setHidden] = useState<number[]>([]),
@@ -35,25 +304,39 @@ export function Results({ result }: { result: QueryResult }) {
     () => fetchedRows(result.rows, filter, sort),
     [result.rows, filter, sort],
   );
-  const visible = result.columns
-    .map((column, index) => ({ column, index }))
-    .filter(({ index }) => !hidden.includes(index))
-    .sort(
-      (a, b) =>
-        Number(pinned.includes(b.index)) - Number(pinned.includes(a.index)),
-    );
+  const rowsRef = useRef(rows);
+  useEffect(() => {
+    rowsRef.current = rows;
+  });
+  const visible = useMemo(
+    () =>
+      result.columns
+        .map((column, index) => ({ column, index }))
+        .filter(({ index }) => !hidden.includes(index))
+        .sort(
+          (a, b) =>
+            Number(pinned.includes(b.index)) - Number(pinned.includes(a.index)),
+        ),
+    [result.columns, hidden, pinned],
+  );
   const sampled = useMemo(() => sampleWidths(result), [result]);
   const width = (index: number) => widths[index] ?? sampled[index] ?? 104;
-  const template = `46px ${visible.map(({ index }) => `${width(index)}px`).join(' ')}`;
-  const totalWidth = visible.reduce((sum, { index }) => sum + width(index), 46);
-  const pinnedLeft = (index: number) =>
-    46 +
-    visible
-      .slice(
-        0,
-        visible.findIndex((c) => c.index === index),
-      )
-      .reduce((sum, c) => sum + width(c.index), 0);
+  const layout = useMemo(() => {
+    const sizes = visible.map(
+      ({ index }) => widths[index] ?? sampled[index] ?? 104,
+    );
+    const lefts: Record<number, number | undefined> = {};
+    let total = ROW_NUMBER_WIDTH;
+    visible.forEach(({ index }, position) => {
+      if (pinned.includes(index)) lefts[index] = total;
+      total += sizes[position] ?? 0;
+    });
+    return {
+      template: `${ROW_NUMBER_WIDTH}px ${sizes.map((size) => `${size}px`).join(' ')}`,
+      totalWidth: total,
+      lefts,
+    };
+  }, [visible, widths, sampled, pinned]);
   const rowHeight = useMedia('(pointer: coarse), (max-width: 600px)') ? 44 : 40;
   const virtual = useVirtualizer({
     count: rows.length,
@@ -64,52 +347,134 @@ export function Results({ result }: { result: QueryResult }) {
   useEffect(() => {
     virtual.measure();
   }, [rowHeight, virtual]);
-  const copy = async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      toast('Copied to clipboard');
-    } catch (error) {
-      toast(message(error), 'error');
-    }
-  };
-  const snapshot = {
+  const copy = useCallback(
+    async (text: string) => {
+      try {
+        await navigator.clipboard.writeText(text);
+        toast('Copied to clipboard');
+      } catch (error) {
+        toast(message(error), 'error');
+      }
+    },
+    [toast],
+  );
+  // Only exports and copies need every row, so build the snapshot on demand.
+  const snapshot = () => ({
     columns: visible.map((c) => c.column),
     rows: rows.map((row) => visible.map((c) => row[c.index])),
-  };
+  });
   const exportResult = (format: 'csv' | 'json') => {
     download(
       `query-result.${format}`,
-      resultText(snapshot, format),
+      resultText(snapshot(), format),
       format === 'json' ? 'application/json' : 'text/csv;charset=utf-8',
     );
     toast('Exported fetched rows');
   };
-  const inspect = (row: number, column: number) => {
-    const col = visible[column];
-    if (col)
-      setExpanded({
-        value: rows[row]?.[col.index],
-        name: col.column.name,
-        row: row + 1,
-      });
-  };
-  const move = (row: number, column: number) => {
-    const next = {
-      row: Math.max(0, Math.min(rows.length - 1, row)),
-      column: Math.max(0, Math.min(visible.length - 1, column)),
-    };
-    setFocus(next);
-    virtual.scrollToIndex(next.row, { align: 'auto' });
-    requestAnimationFrame(() =>
-      requestAnimationFrame(() =>
-        scroll.current
-          ?.querySelector<HTMLElement>(
-            `[data-cell="${next.row}-${next.column}"]`,
-          )
-          ?.focus(),
+  const onCopyRow = useCallback(
+    (index: number) => {
+      const row = rows[index];
+      void copy(
+        resultText(
+          {
+            columns: visible.map((c) => c.column),
+            rows: [row ? visible.map((c) => row[c.index]) : []],
+          },
+          'tsv',
+        ),
+      );
+    },
+    [copy, rows, visible],
+  );
+  const onCopyCell = useCallback(
+    (value: unknown) => void copy(cellText(value)),
+    [copy],
+  );
+  const onInspect = useCallback(
+    (row: number, column: number) => {
+      const col = visible[column];
+      if (col)
+        setExpanded({
+          value: rows[row]?.[col.index],
+          name: col.column.name,
+          row: row + 1,
+        });
+    },
+    [rows, visible],
+  );
+  const onFocusCell = useCallback(
+    (row: number, column: number) =>
+      setFocus((value) =>
+        value.row === row && value.column === column ? value : { row, column },
       ),
-    );
-  };
+    [],
+  );
+  const rowCount = rows.length,
+    columnCount = visible.length;
+  const onMove = useCallback(
+    (row: number, column: number) => {
+      const next = {
+        row: Math.max(0, Math.min(rowCount - 1, row)),
+        column: Math.max(0, Math.min(columnCount - 1, column)),
+      };
+      setFocus(next);
+      virtual.scrollToIndex(next.row, { align: 'auto' });
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() =>
+          scroll.current
+            ?.querySelector<HTMLElement>(
+              `[data-cell="${next.row}-${next.column}"]`,
+            )
+            ?.focus(),
+        ),
+      );
+    },
+    [rowCount, columnCount, virtual],
+  );
+  const onSort = useCallback(
+    (column: number, direction: 'asc' | 'desc') =>
+      setSort({ column, direction }),
+    [],
+  );
+  const onCopyColumn = useCallback(
+    (index: number) => {
+      const column = result.columns[index];
+      if (column)
+        void copy(
+          resultText(
+            {
+              columns: [column],
+              rows: rowsRef.current.map((row) => [row[index]]),
+            },
+            'tsv',
+          ),
+        );
+    },
+    [copy, result.columns],
+  );
+  const onHide = useCallback(
+    (index: number) => setHidden((values) => [...values, index]),
+    [],
+  );
+  const onTogglePin = useCallback(
+    (index: number) =>
+      setPinned((values) =>
+        values.includes(index)
+          ? values.filter((i) => i !== index)
+          : [...values, index],
+      ),
+    [],
+  );
+  const onResize = useCallback(
+    (index: number, size: number) =>
+      setWidths((values) => ({ ...values, [index]: size })),
+    [],
+  );
+  const expandedObject =
+    expanded?.value !== null && typeof expanded?.value === 'object';
+  const expandedText = expandedObject
+    ? JSON.stringify(expanded?.value, null, 2)
+    : cellText(expanded?.value);
   return (
     <section className="results" aria-label="Result snapshot">
       <div className="section-toolbar">
@@ -138,7 +503,7 @@ export function Results({ result }: { result: QueryResult }) {
                   (format) => (
                     <Dropdown.Item
                       key={format}
-                      onSelect={() => void copy(resultText(snapshot, format))}
+                      onSelect={() => void copy(resultText(snapshot(), format))}
                     >
                       Copy as{' '}
                       {format === 'markdown'
@@ -193,7 +558,10 @@ export function Results({ result }: { result: QueryResult }) {
               className="result-header"
               role="row"
               aria-rowindex={1}
-              style={{ gridTemplateColumns: template, width: totalWidth }}
+              style={{
+                gridTemplateColumns: layout.template,
+                width: layout.totalWidth,
+              }}
             >
               <div
                 role="columnheader"
@@ -202,280 +570,54 @@ export function Results({ result }: { result: QueryResult }) {
               >
                 #
               </div>
-              {visible.map(({ column, index }) => (
-                <div
-                  role="columnheader"
-                  aria-label={column.name}
-                  aria-colindex={
-                    visible.findIndex((c) => c.index === index) + 2
-                  }
-                  aria-sort={
-                    sort?.column === index
-                      ? sort.direction === 'asc'
-                        ? 'ascending'
-                        : 'descending'
-                      : 'none'
-                  }
+              {visible.map(({ column, index }, position) => (
+                <ColumnHeader
                   key={index}
-                  className={`result-column ${pinned.includes(index) ? 'pinned-column' : ''}`}
-                  style={
-                    pinned.includes(index)
-                      ? { left: pinnedLeft(index) }
-                      : undefined
-                  }
-                >
-                  <span>
-                    {column.masked && <LockKeyhole size={12} />} {column.name}
-                    {sort?.column === index && (
-                      <span aria-hidden="true">
-                        {sort.direction === 'asc' ? '↑' : '↓'}
-                      </span>
-                    )}
-                    <Dropdown.Root modal={false}>
-                      <Dropdown.Trigger asChild>
-                        <button
-                          className="column-menu"
-                          aria-label={`Column options for ${column.name}`}
-                        >
-                          <MoreHorizontal size={14} />
-                        </button>
-                      </Dropdown.Trigger>
-                      <Dropdown.Portal container={popoverLayer}>
-                        <Dropdown.Content className="dropdown">
-                          <Dropdown.Item
-                            onSelect={() =>
-                              setSort({ column: index, direction: 'asc' })
-                            }
-                          >
-                            Sort ascending
-                          </Dropdown.Item>
-                          <Dropdown.Item
-                            onSelect={() =>
-                              setSort({ column: index, direction: 'desc' })
-                            }
-                          >
-                            Sort descending
-                          </Dropdown.Item>
-                          <Dropdown.Item
-                            onSelect={() =>
-                              void copy(
-                                resultText(
-                                  {
-                                    columns: [column],
-                                    rows: rows.map((row) => [row[index]]),
-                                  },
-                                  'tsv',
-                                ),
-                              )
-                            }
-                          >
-                            Copy column
-                          </Dropdown.Item>
-                          <Dropdown.Item
-                            onSelect={() =>
-                              setHidden((values) => [...values, index])
-                            }
-                          >
-                            Hide column
-                          </Dropdown.Item>
-                          <Dropdown.Item
-                            onSelect={() =>
-                              setPinned((values) =>
-                                values.includes(index)
-                                  ? values.filter((i) => i !== index)
-                                  : [...values, index],
-                              )
-                            }
-                          >
-                            {pinned.includes(index) ? 'Unpin' : 'Pin'} column
-                          </Dropdown.Item>
-                        </Dropdown.Content>
-                      </Dropdown.Portal>
-                    </Dropdown.Root>
-                  </span>
-                  <small>
-                    {column.type_name}
-                    {column.masked ? ' · masked' : ''}
-                  </small>
-                  <div
-                    className="resize-handle"
-                    role="separator"
-                    aria-label={`Resize ${column.name}`}
-                    aria-orientation="vertical"
-                    aria-valuenow={width(index)}
-                    aria-valuemin={90}
-                    aria-valuemax={1000}
-                    tabIndex={0}
-                    onKeyDown={(event) => {
-                      if (
-                        event.key === 'ArrowRight' ||
-                        event.key === 'ArrowLeft'
-                      ) {
-                        event.preventDefault();
-                        setWidths((values) => ({
-                          ...values,
-                          [index]: Math.max(
-                            90,
-                            Math.min(
-                              1000,
-                              width(index) +
-                                (event.key === 'ArrowRight' ? 20 : -20),
-                            ),
-                          ),
-                        }));
-                      }
-                    }}
-                    onPointerDown={(event) => {
-                      const element = event.currentTarget;
-                      element.setPointerCapture(event.pointerId);
-                      const start = event.clientX,
-                        initial = width(index);
-                      const move = (event: PointerEvent) =>
-                        setWidths((values) => ({
-                          ...values,
-                          [index]: Math.min(
-                            1000,
-                            Math.max(90, initial + event.clientX - start),
-                          ),
-                        }));
-                      const end = () => {
-                        element.removeEventListener('pointermove', move);
-                        element.removeEventListener('pointerup', end);
-                        element.removeEventListener('lostpointercapture', end);
-                      };
-                      element.addEventListener('pointermove', move);
-                      element.addEventListener('pointerup', end);
-                      element.addEventListener('lostpointercapture', end);
-                    }}
-                  />
-                </div>
+                  column={column}
+                  index={index}
+                  position={position}
+                  width={width(index)}
+                  left={layout.lefts[index]}
+                  direction={sort?.column === index ? sort.direction : null}
+                  onSort={onSort}
+                  onCopyColumn={onCopyColumn}
+                  onHide={onHide}
+                  onTogglePin={onTogglePin}
+                  onResize={onResize}
+                />
               ))}
             </div>
             <div
               role="rowgroup"
               style={{
                 height: virtual.getTotalSize(),
-                width: totalWidth,
+                width: layout.totalWidth,
                 position: 'relative',
               }}
             >
               {virtual.getVirtualItems().map((item) => (
-                <div
-                  className="result-row"
-                  role="row"
-                  aria-rowindex={item.index + 2}
+                <ResultRow
                   key={item.key}
-                  style={{
-                    position: 'absolute',
-                    top: item.start,
-                    height: item.size,
-                    gridTemplateColumns: template,
-                    width: totalWidth,
-                  }}
-                >
-                  <Tip text="Copy row as TSV">
-                    <button
-                      role="gridcell"
-                      className="row-number pinned-column"
-                      style={{ left: 0 }}
-                      aria-colindex={1}
-                      aria-label={`Copy row ${item.index + 1}`}
-                      tabIndex={-1}
-                      onClick={() =>
-                        void copy(
-                          resultText(
-                            {
-                              columns: snapshot.columns,
-                              rows: [snapshot.rows[item.index] ?? []],
-                            },
-                            'tsv',
-                          ),
-                        )
-                      }
-                    >
-                      {item.index + 1}
-                    </button>
-                  </Tip>
-                  {visible.map(({ column, index }, position) => {
-                    const value = rows[item.index]?.[index];
-                    const cell = presentCell(value, column);
-                    return (
-                      <div
-                        role="gridcell"
-                        key={index}
-                        aria-colindex={position + 2}
-                        className={`result-cell cell-${cell.kind} ${value === null ? 'null' : ''} ${pinned.includes(index) ? 'pinned-column' : ''}`}
-                        style={
-                          pinned.includes(index)
-                            ? { left: pinnedLeft(index) }
-                            : undefined
-                        }
-                      >
-                        <button
-                          className="cell-value"
-                          data-cell={`${item.index}-${position}`}
-                          tabIndex={
-                            focus.row === item.index &&
-                            Math.min(focus.column, visible.length - 1) ===
-                              position
-                              ? 0
-                              : -1
-                          }
-                          title={cell.raw}
-                          onFocus={() =>
-                            setFocus({ row: item.index, column: position })
-                          }
-                          onClick={() => inspect(item.index, position)}
-                          onKeyDown={(event) => {
-                            const offsets: Record<string, [number, number]> = {
-                              ArrowRight: [0, 1],
-                              ArrowLeft: [0, -1],
-                              ArrowDown: [1, 0],
-                              ArrowUp: [-1, 0],
-                            };
-                            const offset = offsets[event.key];
-                            if (offset) {
-                              event.preventDefault();
-                              move(
-                                item.index + offset[0],
-                                position + offset[1],
-                              );
-                            } else if (
-                              event.key === 'Home' ||
-                              event.key === 'End'
-                            ) {
-                              event.preventDefault();
-                              move(
-                                event.ctrlKey
-                                  ? event.key === 'Home'
-                                    ? 0
-                                    : rows.length - 1
-                                  : item.index,
-                                event.key === 'Home' ? 0 : visible.length - 1,
-                              );
-                            }
-                          }}
-                        >
-                          <span
-                            className={
-                              cell.kind === 'json' ? 'json-chip' : undefined
-                            }
-                          >
-                            {cell.text}
-                          </span>
-                        </button>
-                        <button
-                          className="cell-copy"
-                          tabIndex={-1}
-                          aria-label={`Copy ${column.name} row ${item.index + 1}`}
-                          onClick={() => void copy(cellText(value))}
-                        >
-                          <Copy size={12} />
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
+                  rowIndex={item.index}
+                  start={item.start}
+                  size={item.size}
+                  row={rows[item.index]}
+                  lastRow={rows.length - 1}
+                  visible={visible}
+                  lefts={layout.lefts}
+                  template={layout.template}
+                  totalWidth={layout.totalWidth}
+                  focusColumn={
+                    focus.row === item.index
+                      ? Math.min(focus.column, visible.length - 1)
+                      : -1
+                  }
+                  onCopyRow={onCopyRow}
+                  onCopyCell={onCopyCell}
+                  onInspect={onInspect}
+                  onFocusCell={onFocusCell}
+                  onMove={onMove}
+                />
               ))}
             </div>
           </div>
@@ -526,11 +668,7 @@ export function Results({ result }: { result: QueryResult }) {
           if (!open) setExpanded(null);
         }}
         drawer
-        title={
-          expanded?.value !== null && typeof expanded?.value === 'object'
-            ? 'JSON value'
-            : 'Cell value'
-        }
+        title={expandedObject ? 'JSON value' : 'Cell value'}
         description={
           expanded
             ? `${expanded.name} · fetched row ${expanded.row}`
@@ -538,27 +676,13 @@ export function Results({ result }: { result: QueryResult }) {
         }
       >
         <pre className="json-preview" tabIndex={0}>
-          {expanded?.value === null
-            ? 'NULL'
-            : typeof expanded?.value === 'object'
-              ? JSON.stringify(expanded.value, null, 2)
-              : cellText(expanded?.value)}
+          {expanded?.value === null ? 'NULL' : expandedText}
         </pre>
-        <Button
-          onClick={() =>
-            void copy(
-              typeof expanded?.value === 'object'
-                ? JSON.stringify(expanded?.value, null, 2)
-                : cellText(expanded?.value),
-            )
-          }
-        >
+        <Button onClick={() => void copy(expandedText)}>
           <Copy size={14} />
-          {expanded?.value !== null && typeof expanded?.value === 'object'
-            ? 'Copy JSON'
-            : 'Copy value'}
+          {expandedObject ? 'Copy JSON' : 'Copy value'}
         </Button>
       </Modal>
     </section>
   );
-}
+});

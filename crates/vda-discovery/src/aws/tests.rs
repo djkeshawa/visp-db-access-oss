@@ -236,6 +236,36 @@ async fn source_test_reports_identity_and_regional_read_permissions() {
 }
 
 #[tokio::test]
+async fn source_test_probes_regions_while_identity_lookup_is_pending() {
+    use aws_smithy_http_client::test_util::NeverClient;
+    let sts_never = NeverClient::new();
+    let identity = aws_sdk_sts::Client::from_conf(
+        aws_sdk_sts::Config::builder()
+            .with_test_defaults_v2()
+            .http_client(sts_never.clone())
+            .build(),
+    );
+    let rds_never = NeverClient::new();
+    let region = Client::from_conf(
+        aws_sdk_rds::Config::builder()
+            .with_test_defaults_v2()
+            .http_client(rds_never.clone())
+            .build(),
+    );
+    let _ = tokio::time::timeout(
+        Duration::from_millis(100),
+        test_clients(identity, vec![("us-east-1".into(), region)]),
+    )
+    .await;
+    assert_eq!(sts_never.num_calls(), 1);
+    assert_eq!(
+        rds_never.num_calls(),
+        1,
+        "regional probes must not wait for the identity lookup"
+    );
+}
+
+#[tokio::test]
 async fn assume_role_request_wires_external_id_session_duration_and_role_without_network() {
     use aws_sdk_sts::config::{Credentials, ProvideCredentials};
     use aws_smithy_http_client::test_util::capture_request;

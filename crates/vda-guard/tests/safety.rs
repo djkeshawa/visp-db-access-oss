@@ -1109,3 +1109,163 @@ fn mysql_comments_and_strings_cannot_hide_statements() {
         );
     }
 }
+
+#[test]
+fn blocked_table_wildcard_matches_names_containing_a_literal_star() {
+    for (pattern, quoted_table, dialect) in [
+        ("a*c", "\"a*bc\"", Dialect::Postgres),
+        ("a*s", "\"a*xs\"", Dialect::Postgres),
+        ("app.sec*ts", "app.\"sec*rets\"", Dialect::Postgres),
+        ("a*c", "`a*bc`", Dialect::MySql),
+    ] {
+        let mut p = policy();
+        p.blocked_tables.push(pattern.into());
+        let a = analyze(
+            &format!("SELECT * FROM {quoted_table}"),
+            dialect,
+            AccessLevel::Read,
+            &p,
+        );
+        assert!(
+            issue(&a, "blocked_table"),
+            "{pattern} {quoted_table}: {a:?}"
+        );
+    }
+}
+
+#[test]
+fn postfix_operator_chains_fail_closed() {
+    for dialect in [Dialect::Postgres, Dialect::MySql] {
+        for suffix in [
+            " IS NULL",
+            " IS NOT NULL",
+            " IS TRUE",
+            " ISNULL",
+            " NOTNULL",
+            " COLLATE x",
+            " AT TIME ZONE 1",
+        ] {
+            let sql = format!("SELECT 1{}", suffix.repeat(5_000));
+            let a = check(&sql, dialect, AccessLevel::Admin);
+            assert_eq!(a.verdict, Verdict::Deny, "{suffix}: {:?}", a.issues.len());
+            assert!(issue(&a, "parse_error"), "{suffix}");
+        }
+    }
+}
+
+fn hint<'a>(a: &'a Analysis, code: &str) -> Option<&'a vda_guard::Suggestion> {
+    a.suggestions.iter().find(|s| s.code == code)
+}
+
+#[test]
+fn performance_suggestions() {
+    let wide = GuardPolicy {
+        max_rows: 1000,
+        ..policy()
+    };
+    for dialect in [Dialect::Postgres, Dialect::MySql] {
+        let a = analyze("SELECT * FROM users", dialect, AccessLevel::Read, &wide);
+        assert_eq!(a.verdict, Verdict::Allow);
+        assert!(hint(&a, "select_star").is_some());
+        let fix = hint(&a, "add_limit").and_then(|s| s.fix.clone()).unwrap();
+        assert_eq!(fix.action, vda_guard::FixAction::Replace);
+        assert_eq!(fix.sql, "SELECT * FROM users LIMIT 100");
+        // The fix must itself be allowed and carry no repeat suggestion.
+        let fixed = analyze(&fix.sql, dialect, AccessLevel::Read, &wide);
+        assert_eq!(fixed.verdict, Verdict::Allow);
+        assert!(hint(&fixed, "add_limit").is_none());
+
+        for (sql, code) in [
+            (
+                "SELECT id FROM users WHERE email LIKE '%@x.io'",
+                "leading_wildcard",
+            ),
+            (
+                "SELECT id FROM users WHERE lower(email) = 'a@x.io'",
+                "function_on_column",
+            ),
+            (
+                "SELECT id FROM users WHERE CAST(created_at AS DATE) = '2026-01-01'",
+                "function_on_column",
+            ),
+            (
+                "SELECT id FROM users WHERE id NOT IN (SELECT user_id FROM bans)",
+                "not_in_subquery",
+            ),
+            (
+                "SELECT id FROM users ORDER BY id LIMIT 10 OFFSET 50000",
+                "large_offset",
+            ),
+        ] {
+            let a = analyze(sql, dialect, AccessLevel::Read, &wide);
+            assert!(hint(&a, code).is_some(), "{sql} should suggest {code}");
+        }
+        let random = if dialect == Dialect::MySql {
+            "rand()"
+        } else {
+            "random()"
+        };
+        let a = analyze(
+            &format!("SELECT id FROM users ORDER BY {random} LIMIT 5"),
+            dialect,
+            AccessLevel::Read,
+            &wide,
+        );
+        assert!(hint(&a, "order_by_random").is_some());
+
+        // Sargable, bounded, or aggregate reads stay quiet.
+        for sql in [
+            "SELECT id, email FROM users WHERE created_at > now() LIMIT 10",
+            "SELECT count(*) FROM users",
+            "SELECT id FROM users WHERE email LIKE 'a%' LIMIT 5",
+        ] {
+            let a = analyze(sql, dialect, AccessLevel::Read, &wide);
+            assert!(a.suggestions.is_empty(), "{sql}: {:?}", a.suggestions);
+        }
+    }
+}
+
+#[test]
+fn write_preview_and_denied_queries() {
+    for dialect in [Dialect::Postgres, Dialect::MySql] {
+        let a = check(
+            "UPDATE users SET active = false WHERE last_login < '2020-01-01'",
+            dialect,
+            AccessLevel::Write,
+        );
+        let fix = hint(&a, "preview_write")
+            .and_then(|s| s.fix.clone())
+            .unwrap();
+        assert_eq!(fix.action, vda_guard::FixAction::NewTab);
+        assert_eq!(
+            fix.sql,
+            "SELECT COUNT(*) FROM users WHERE last_login < '2020-01-01'"
+        );
+        assert_eq!(
+            check(&fix.sql, dialect, AccessLevel::Read).verdict,
+            Verdict::Allow
+        );
+
+        let a = check(
+            "DELETE FROM sessions WHERE expires_at < '2026-01-01'",
+            dialect,
+            AccessLevel::Write,
+        );
+        assert_eq!(
+            hint(&a, "preview_write")
+                .and_then(|s| s.fix.as_ref())
+                .map(|f| f.sql.as_str()),
+            Some("SELECT COUNT(*) FROM sessions WHERE expires_at < '2026-01-01'")
+        );
+        // Denied SQL gets no performance advice: the block must be fixed first.
+        assert!(check("DELETE FROM sessions", dialect, AccessLevel::Write)
+            .suggestions
+            .is_empty());
+    }
+    let a = check(
+        r"SELECT * FROM t WHERE note LIKE '%a\\b'",
+        Dialect::MySql,
+        AccessLevel::Read,
+    );
+    assert!(hint(&a, "leading_wildcard").is_some());
+}

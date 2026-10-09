@@ -2,6 +2,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useMemo,
   useState,
   type ReactNode,
 } from 'react';
@@ -58,8 +59,9 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
       `${preferences.editorFontSize}px`,
     );
   }, [preferences]);
+  const value = useMemo(() => ({ preferences, setPreferences }), [preferences]);
   return (
-    <PreferencesContext.Provider value={{ preferences, setPreferences }}>
+    <PreferencesContext.Provider value={value}>
       {children}
     </PreferencesContext.Provider>
   );

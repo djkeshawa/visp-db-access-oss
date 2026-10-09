@@ -201,6 +201,7 @@ async fn finish(
     let mut new = 0_i32;
     let mut changed = 0_i32;
     let mut seen = std::collections::HashSet::new();
+    let mut inventory = Vec::new();
     for mut resource in outcome.resources {
         if !regions.contains(&resource.region) || !seen.insert(resource.arn.clone()) {
             continue;
@@ -209,17 +210,27 @@ async fn finish(
             vda_discovery::suggested_environment(&resource.tags, &resource.identifier, &keys);
         let payload = json!(resource);
         crate::sanitation::json(&payload)?;
-        let prior:Option<(Value,Option<Value>,String)>=sqlx::query_as("SELECT r.payload,to_jsonb(c),r.status FROM discovered_resources r LEFT JOIN clusters c ON c.id=r.cluster_id WHERE source_id=$1 AND arn=$2 FOR UPDATE OF r").bind(source).bind(&resource.arn).fetch_optional(&mut *tx).await?;
+        inventory.push((resource, payload));
+    }
+    // One locked read replaces a lookup per resource; only the cluster fields that
+    // drift detection compares are loaded, never the stored credentials.
+    let arns: Vec<&str> = inventory.iter().map(|(r, _)| r.arn.as_str()).collect();
+    let prior_rows:Vec<(String,Value,Option<Value>)>=sqlx::query_as("SELECT r.arn,r.payload,CASE WHEN c.id IS NULL THEN NULL ELSE jsonb_build_object('host',c.host,'port',c.port,'replica_host',c.replica_host,'replica_port',c.replica_port,'engine',c.engine) END FROM discovered_resources r LEFT JOIN clusters c ON c.id=r.cluster_id WHERE r.source_id=$1 AND r.arn=ANY($2) ORDER BY r.arn FOR UPDATE OF r").bind(source).bind(&arns).fetch_all(&mut *tx).await?;
+    let prior: std::collections::HashMap<String, (Value, Option<Value>)> = prior_rows
+        .into_iter()
+        .map(|(arn, payload, cluster)| (arn, (payload, cluster)))
+        .collect();
+    for (resource, payload) in inventory {
+        let prior = prior.get(&resource.arn);
         if prior.is_none() {
             new += 1;
         }
-        if prior.as_ref().is_some_and(|(p, _, _)| *p != payload) {
+        if prior.is_some_and(|(p, _)| *p != payload) {
             changed += 1;
         }
         let drift = json!(drift::compare(
             &payload,
-            prior.as_ref().and_then(|(_, c, _)| c.as_ref()),
-            false
+            prior.and_then(|(_, c)| c.as_ref())
         ));
         sqlx::query("INSERT INTO discovered_resources(id,source_id,arn,region,engine,payload,tags,drift,last_run_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(source_id,arn) DO UPDATE SET region=EXCLUDED.region,engine=EXCLUDED.engine,payload=EXCLUDED.payload,tags=EXCLUDED.tags,drift=EXCLUDED.drift,last_run_id=EXCLUDED.last_run_id,last_seen_at=clock_timestamp(),status=CASE WHEN discovered_resources.status='gone' THEN CASE WHEN discovered_resources.cluster_id IS NULL THEN 'new' ELSE 'imported' END ELSE discovered_resources.status END").bind(Uuid::new_v4()).bind(source).bind(&resource.arn).bind(&resource.region).bind(&resource.engine).bind(payload).bind(json!(resource.tags)).bind(drift).bind(run).execute(&mut *tx).await?;
     }

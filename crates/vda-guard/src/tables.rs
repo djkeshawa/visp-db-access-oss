@@ -44,13 +44,14 @@ fn glob(pattern: &str, value: &str) -> bool {
     let (p, v) = (pattern.as_bytes(), value.as_bytes());
     let (mut pi, mut vi, mut star, mut retry) = (0, 0, None, 0);
     while vi < v.len() {
-        if p.get(pi) == v.get(vi) {
-            pi += 1;
-            vi += 1;
-        } else if p.get(pi) == Some(&b'*') {
+        // A pattern star is always a wildcard, even when the value holds a literal '*'.
+        if p.get(pi) == Some(&b'*') {
             star = Some(pi);
             pi += 1;
             retry = vi;
+        } else if p.get(pi) == v.get(vi) {
+            pi += 1;
+            vi += 1;
         } else if let Some(pos) = star {
             retry += 1;
             vi = retry;

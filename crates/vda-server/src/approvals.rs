@@ -43,7 +43,9 @@ pub async fn create(
     Extension(ip): Extension<ClientIp>,
     Input(body): Input<ApprovalInput>,
 ) -> Result<Json<Value>, ApiError> {
-    let c = rbac::require_level(&state.db, &user, body.cluster_id, AccessLevel::Write).await?;
+    let (c, level) =
+        rbac::require_level_effective(&state.db, &user, body.cluster_id, AccessLevel::Write)
+            .await?;
     if body.reason.trim().is_empty()
         || body.reason.len() > 10000
         || body.sql.trim().is_empty()
@@ -55,9 +57,6 @@ pub async fn create(
     if !crate::network::allowed(ip.0, &crate::network::parse_cidrs(&policy.allowed_cidrs)?) {
         return Err(ApiError::forbidden());
     }
-    let level = rbac::effective(&state.db, &user, &c)
-        .await?
-        .ok_or_else(ApiError::forbidden)?;
     let dialect = if c.engine == "mysql" {
         vda_guard::Dialect::MySql
     } else {
@@ -215,12 +214,12 @@ async fn review(
     approved: bool,
     ip: std::net::IpAddr,
 ) -> Result<Value, ApiError> {
+    // `visible` already requires cluster admin for every non-requester; requesters never self-review.
     let (cluster_id, requester) = visible(state, user, id).await?;
-    rbac::require_level(&state.db, user, cluster_id, AccessLevel::Admin).await?;
-    crate::network::require_cluster(state, cluster_id, ip).await?;
     if requester == user.id {
         return Err(ApiError::forbidden());
     }
+    crate::network::require_cluster(state, cluster_id, ip).await?;
     if note.as_ref().is_some_and(|n| n.len() > 10000)
         || (!approved && note.as_ref().is_none_or(|n| n.trim().is_empty()))
     {
@@ -299,20 +298,25 @@ pub async fn execute(
     if user.id != requester && Some(user.id) != reviewer {
         return Err(ApiError::forbidden());
     }
-    rbac::require_level(&state.db, &user, cluster, AccessLevel::Write).await?;
-    let original = db::user(&state.db, requester).await?;
-    if original.disabled {
+    let reviewer_id = reviewer.ok_or_else(ApiError::forbidden)?;
+    let (original, reviewer, policy) = tokio::try_join!(
+        db::user(&state.db, requester),
+        db::user(&state.db, reviewer_id),
+        db::policy(&state.db, cluster),
+    )?;
+    if original.disabled || reviewer.disabled {
         return Err(ApiError::forbidden());
     }
-    // Both the requester and reviewer must retain their required rights at execution.
-    rbac::require_level(&state.db, &original, cluster, AccessLevel::Write).await?;
-    let reviewer = db::user(&state.db, reviewer.ok_or_else(ApiError::forbidden)?).await?;
-    if reviewer.disabled {
+    // The caller, the requester and the reviewer must all retain their required rights at execution.
+    tokio::try_join!(
+        rbac::require_level(&state.db, &user, cluster, AccessLevel::Write),
+        rbac::require_level(&state.db, &original, cluster, AccessLevel::Write),
+        rbac::require_level(&state.db, &reviewer, cluster, AccessLevel::Admin),
+    )?;
+    if !crate::network::allowed(ip.0, &crate::network::parse_cidrs(&policy.allowed_cidrs)?) {
         return Err(ApiError::forbidden());
     }
-    rbac::require_level(&state.db, &reviewer, cluster, AccessLevel::Admin).await?;
-    crate::network::require_cluster(&state, cluster, ip.0).await?;
-    let timeout_ms = db::policy(&state.db, cluster).await?.statement_timeout_ms;
+    let timeout_ms = policy.statement_timeout_ms;
     let mut tx = state.db.begin().await?;
     let sql: Option<String> = sqlx::query_scalar(
         "UPDATE approvals SET execution_timeout_ms=$2,execution_started_at=now(),status='executing'

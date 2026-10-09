@@ -33,9 +33,12 @@ export const request: Transport = async <T>(
     const value = (await response.json().catch(() => null)) as {
       error?: { code: string; message: string; details: unknown };
     } | null;
-    if (response.status === 401 && !location.pathname.startsWith('/login'))
-      if (typeof window !== 'undefined')
-        window.dispatchEvent(new Event('vda:session-expired'));
+    if (
+      response.status === 401 &&
+      typeof window !== 'undefined' &&
+      !globalThis.location?.pathname.startsWith('/login')
+    )
+      window.dispatchEvent(new Event('vda:session-expired'));
     throw new ApiError(
       value?.error?.code ?? 'http_error',
       value?.error?.message ?? `Request failed (${response.status}).`,
@@ -44,7 +47,18 @@ export const request: Transport = async <T>(
     );
   }
   if (response.status === 204) return undefined as T;
-  return (await response.json()) as T;
+  try {
+    return (await response.json()) as T;
+  } catch (error) {
+    // An aborted body read must stay an abort; anything else is a bad payload.
+    if (error instanceof DOMException && error.name === 'AbortError')
+      throw error;
+    throw new ApiError(
+      'invalid_response',
+      'The server returned an unreadable response.',
+      response.status,
+    );
+  }
 };
 export const json = (method: string, body?: unknown): RequestInit => ({
   method,

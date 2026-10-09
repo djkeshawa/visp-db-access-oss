@@ -117,7 +117,7 @@ function RunHistory({
           disabled={query.isFetchingNextPage}
           onClick={() => void query.fetchNextPage()}
         >
-          Load more scans
+          {query.isFetchingNextPage ? 'Loading…' : 'Load more scans'}
         </Button>
       )}
     </Modal>
@@ -130,6 +130,7 @@ export function DiscoverySources() {
     [history, setHistory] = useState<DiscoverySource | null>(null);
   const [testing, setTesting] = useState<DiscoverySource | null>(null);
   const action = useAction('Source updated'),
+    remove = useAction('Source deleted'),
     scan = useAction<ScanRun>('Discovery scan completed'),
     test = useAction<DiscoveryTest>('');
   return (
@@ -301,14 +302,14 @@ export function DiscoverySources() {
       <Confirm
         open={!!deleting}
         onOpenChange={(open) => {
-          if (!open && !action.isPending) setDeleting(null);
+          if (!open && !remove.isPending) setDeleting(null);
         }}
         danger
         title="Delete discovery source?"
         description={`Delete ${deleting?.name ?? 'this source'} and its discovery inventory? Imported clusters will remain available.`}
-        busy={action.isPending}
+        busy={remove.isPending}
         onConfirm={() =>
-          action.mutate(
+          remove.mutate(
             { path: `/discovery/sources/${deleting?.id}`, method: 'DELETE' },
             { onSuccess: () => setDeleting(null) },
           )

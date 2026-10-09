@@ -6,6 +6,9 @@ use aws_sdk_rds::types::{DbCluster, DbInstance, Tag};
 
 use crate::{DiscoveredDb, ScanOutcome};
 
+/// Tag keys consulted, in order, when a source does not configure its own.
+pub const DEFAULT_ENVIRONMENT_TAG_KEYS: [&str; 3] = ["environment", "env", "stage"];
+
 /// Map only database engines supported by the gateway.
 pub fn supported_engine(engine: &str) -> Option<&'static str> {
     match engine {
@@ -62,7 +65,7 @@ fn valid_port(port: i32) -> Option<u16> {
 }
 
 fn environment(tags: &BTreeMap<String, String>, identifier: &str) -> String {
-    let keys = ["environment", "env", "stage"].map(String::from);
+    let keys = DEFAULT_ENVIRONMENT_TAG_KEYS.map(String::from);
     suggested_environment(tags, identifier, &keys)
 }
 

@@ -207,29 +207,6 @@ impl AppState {
         .await?;
         Ok(())
     }
-    /// Synchronous persistence for low-volume administrative/security events.
-    pub async fn record_audit(
-        &self,
-        actor: Option<Uuid>,
-        action: &str,
-        target_type: Option<&str>,
-        target_id: Option<Uuid>,
-        ip: Option<IpAddr>,
-        details: serde_json::Value,
-    ) -> Result<(), ApiError> {
-        let event = Event {
-            id: Uuid::new_v4(),
-            actor_id: actor,
-            action: action.into(),
-            target_type: target_type.map(str::to_owned),
-            target_id,
-            ip,
-            details,
-            created_at: chrono::Utc::now(),
-        };
-        crate::audit::persist(&self.db, &event).await?;
-        Ok(())
-    }
 }
 /// Build the complete API and SPA router.
 pub fn router(state: AppState) -> Router {

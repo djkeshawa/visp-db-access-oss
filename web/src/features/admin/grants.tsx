@@ -1,5 +1,5 @@
 import { BulkGrants } from './bulk-grants';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import type { Cluster, Grant, Project, UserLookup } from '../../api/types';
 import { useAction, useResource } from '../../lib/query';
 import { useUser } from '../auth/session';
@@ -25,7 +25,11 @@ export function GrantsTable({
   const [revoke, setRevoke] = useState<Grant | null>(null),
     [selected, setSelected] = useState<string[]>([]),
     [bulk, setBulk] = useState(false);
-  const selection = items.filter((item) => selected.includes(item.id));
+  const selectedIds = useMemo(() => new Set(selected), [selected]);
+  const selection = useMemo(
+    () => items.filter((item) => selectedIds.has(item.id)),
+    [items, selectedIds],
+  );
   const remove = useAction('Access revoked');
   return (
     <>
@@ -62,7 +66,7 @@ export function GrantsTable({
                     aria-label="Select all loaded grants"
                     checked={
                       items.length > 0 &&
-                      items.every((item) => selected.includes(item.id))
+                      items.every((item) => selectedIds.has(item.id))
                     }
                     onChange={(event) =>
                       setSelected(
@@ -90,7 +94,7 @@ export function GrantsTable({
                     <input
                       type="checkbox"
                       aria-label={`Select grant for ${grant.user.name} on ${grant.scope_name}`}
-                      checked={selected.includes(grant.id)}
+                      checked={selectedIds.has(grant.id)}
                       onChange={(event) =>
                         setSelected((ids) =>
                           event.target.checked
@@ -133,9 +137,10 @@ export function GrantsTable({
         open={bulk}
         onOpenChange={setBulk}
         grants={selection}
-        onRemoved={(ids) =>
-          setSelected((selected) => selected.filter((id) => !ids.includes(id)))
-        }
+        onRemoved={(ids) => {
+          const removed = new Set(ids);
+          setSelected((selected) => selected.filter((id) => !removed.has(id)));
+        }}
       />
       <Confirm
         open={!!revoke}
@@ -177,14 +182,35 @@ export function AddGrant({
     `/users/lookup?q=${encodeURIComponent(debounced)}`,
     open && [...debounced].length >= 2,
   );
-  const projects = useResource<{ items: Project[] }>('/projects');
-  const clusters = useResource<{ items: Cluster[] }>('/clusters');
+  const projects = useResource<{ items: Project[] }>(
+    '/projects',
+    open && !cluster,
+  );
+  const clusters = useResource<{ items: Cluster[] }>(
+    '/clusters',
+    open && !cluster,
+  );
   const [userId, setUserId] = useState(''),
     [level, setLevel] = useState('read'),
     [scope, setScope] = useState(cluster ? 'cluster' : 'project'),
     [scopeId, setScopeId] = useState(cluster?.id ?? ''),
     [expiry, setExpiry] = useState('8');
   const create = useAction('Access granted');
+  const { reset: resetCreate } = create;
+  const clusterId = cluster?.id;
+  // Start every opening from a clean form instead of the previous grant's values.
+  useEffect(() => {
+    if (!open) return;
+    setSearch('');
+    setDebounced('');
+    setSelectedUser(null);
+    setUserId('');
+    setLevel('read');
+    setScope(clusterId ? 'cluster' : 'project');
+    setScopeId(clusterId ?? '');
+    setExpiry('8');
+    resetCreate();
+  }, [open, clusterId, resetCreate]);
   const scopeOptions =
     (scope === 'project' ? projects.data?.items : clusters.data?.items)?.map(
       (item) => ({ value: item.id, label: item.name }),
@@ -199,6 +225,7 @@ export function AddGrant({
       <form
         onSubmit={(event) => {
           event.preventDefault();
+          if (create.isPending || !userId || !scopeId) return;
           create.mutate(
             {
               path: '/grants',

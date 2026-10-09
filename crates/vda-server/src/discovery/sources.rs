@@ -36,7 +36,7 @@ pub(super) struct SourceInput {
     enabled: bool,
 }
 fn tag_keys() -> Vec<String> {
-    ["environment", "env", "stage"]
+    vda_discovery::mapping::DEFAULT_ENVIRONMENT_TAG_KEYS
         .into_iter()
         .map(str::to_owned)
         .collect()

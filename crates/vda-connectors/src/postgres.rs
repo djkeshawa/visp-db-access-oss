@@ -8,10 +8,7 @@ use crate::{
 };
 use futures::TryStreamExt;
 use sqlx::Either;
-use sqlx::{
-    postgres::PgPoolOptions, Column as _, Connection, Executor, PgConnection, PgPool, Statement,
-    TypeInfo,
-};
+use sqlx::{postgres::PgPoolOptions, Connection, Executor, PgConnection, PgPool, Statement};
 use std::{
     sync::atomic::{AtomicI32, Ordering},
     time::Instant,
@@ -188,17 +185,13 @@ async fn clear_statements(connection: &mut PgConnection) -> Result<(), Connector
 }
 
 async fn describe(connection: &mut PgConnection, sql: &str) -> Result<Vec<Column>, ConnectorError> {
-    Ok(connection
-        .prepare(sql)
-        .await
-        .map_err(cancel::error)?
-        .columns()
-        .iter()
-        .map(|column| Column {
-            name: column.name().to_owned(),
-            type_name: column.type_info().name().to_owned(),
-        })
-        .collect())
+    Ok(decode::columns(
+        connection
+            .prepare(sql)
+            .await
+            .map_err(cancel::error)?
+            .columns(),
+    ))
 }
 async fn read(
     connection: &mut PgConnection,
@@ -209,12 +202,10 @@ async fn read(
     results.columns(describe(connection, sql).await?);
     let mut stream = sqlx::query(sql).persistent(false).fetch(&mut *connection);
     while let Some(row) = stream.try_next().await.map_err(cancel::error)? {
-        results.columns(decode::pg_columns(&row));
-        if results.full() {
-            results.truncate();
-            break;
+        if results.needs_columns() {
+            results.columns(decode::pg_columns(&row));
         }
-        if !results.push(decode::postgres(&row)) {
+        if !results.offer(|| decode::postgres(&row)) {
             break;
         }
     }
@@ -246,12 +237,10 @@ async fn write(
                 }
             }
             Either::Right(row) => {
-                results.columns(decode::pg_columns(&row));
-                if results.full() {
-                    results.truncate();
-                } else {
-                    results.push(decode::postgres(&row));
+                if results.needs_columns() {
+                    results.columns(decode::pg_columns(&row));
                 }
+                results.offer(|| decode::postgres(&row));
             }
         }
     }

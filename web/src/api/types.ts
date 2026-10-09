@@ -112,7 +112,21 @@ export interface Analysis {
   statements: StatementAnalysis[];
   rewritten_sql: string | null;
   issues: Issue[];
+  /** Advisory performance hints; absent on analyses stored by older servers. */
+  suggestions?: Suggestion[];
 } // issues = flattened, incl. top-level
+
+export interface Fix {
+  label: string;
+  sql: string;
+  /** `replace` swaps the editor text; `new_tab` opens the SQL alongside it. */
+  action: 'replace' | 'new_tab';
+}
+export interface Suggestion {
+  code: string;
+  message: string;
+  fix?: Fix;
+}
 
 export interface Column {
   name: string;

@@ -60,7 +60,10 @@ fn text(row: &[Value], index: usize) -> Result<String, ConnectorError> {
     row.get(index)
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| ConnectorError::Database("unexpected schema catalog value".into()))
+        .ok_or_else(catalog_error)
+}
+fn catalog_error() -> ConnectorError {
+    ConnectorError::Database("unexpected schema catalog value".into())
 }
 fn integer(value: &Value) -> Option<i64> {
     value
@@ -79,24 +82,22 @@ fn assemble(rows: Vec<Vec<Value>>) -> Result<SchemaTree, ConnectorError> {
     let mut tables = BTreeMap::<(String, String), SchemaTable>::new();
     let mut columns = 0usize;
     for row in rows {
-        let schema = text(&row, 0)?;
-        let name = text(&row, 1)?;
-        if !tables.contains_key(&(schema.clone(), name.clone())) && tables.len() >= MAX_TABLES {
+        let key = (text(&row, 0)?, text(&row, 1)?);
+        if tables.len() >= MAX_TABLES && !tables.contains_key(&key) {
             continue;
         }
-        let kind = match text(&row, 2)?.as_str() {
-            "v" => TableKind::View,
-            "m" => TableKind::MaterializedView,
-            _ => TableKind::Table,
+        let kind = match row.get(2).and_then(Value::as_str) {
+            Some("v") => TableKind::View,
+            Some("m") => TableKind::MaterializedView,
+            Some(_) => TableKind::Table,
+            None => return Err(catalog_error()),
         };
-        let table = tables
-            .entry((schema, name.clone()))
-            .or_insert_with(|| SchemaTable {
-                name,
-                kind,
-                row_estimate: row.get(3).and_then(integer),
-                columns: Vec::new(),
-            });
+        let table = tables.entry(key).or_insert_with_key(|key| SchemaTable {
+            name: key.1.clone(),
+            kind,
+            row_estimate: row.get(3).and_then(integer),
+            columns: Vec::new(),
+        });
         if row.get(4).is_some_and(|value| !value.is_null()) && columns < MAX_COLUMNS {
             table.columns.push(SchemaColumn {
                 name: text(&row, 4)?,

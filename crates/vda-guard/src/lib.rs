@@ -10,6 +10,7 @@
 mod classify;
 mod engine;
 mod functions;
+mod hints;
 mod mysql;
 mod parse;
 mod policy;
@@ -144,6 +145,40 @@ pub struct Analysis {
     pub rewritten_sql: Option<String>,
     /// All issues, flattened, including top-level ones (e.g. parse errors).
     pub issues: Vec<Issue>,
+    /// Advisory performance hints; never affect the verdict. Empty when denied.
+    #[serde(default)]
+    pub suggestions: Vec<Suggestion>,
+}
+
+/// An optional performance improvement, independent of the safety verdict.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Suggestion {
+    /// Stable machine code, e.g. `select_star`, `leading_wildcard`.
+    pub code: String,
+    /// What is slow and how to improve it.
+    pub message: String,
+    /// SQL the console can apply for the user; never executed by the guard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<Fix>,
+}
+
+/// A ready-to-apply SQL edit attached to a suggestion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Fix {
+    /// Short button label.
+    pub label: String,
+    /// The SQL to apply.
+    pub sql: String,
+    /// Whether to replace the current query or open the SQL alongside it.
+    pub action: FixAction,
+}
+
+/// How the console applies a [`Fix`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixAction {
+    Replace,
+    NewTab,
 }
 
 impl Analysis {

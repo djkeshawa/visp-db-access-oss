@@ -14,6 +14,7 @@ use sqlx::{
     },
     Column as _, Row, TypeInfo, ValueRef,
 };
+use std::fmt::Write as _;
 
 const JS_SAFE_INTEGER: u64 = (1 << 53) - 1;
 pub(crate) fn signed(value: i64) -> Value {
@@ -33,6 +34,17 @@ pub(crate) fn unsigned(value: u64) -> Value {
 fn float(value: f64) -> Value {
     serde_json::Number::from_f64(value)
         .map_or_else(|| Value::String(value.to_string()), Value::Number)
+}
+/// FLOAT4 values keep the shortest decimal that identifies them (0.1, not 0.10000000149011612).
+fn float32(value: f32) -> Value {
+    float(if value.is_finite() {
+        value
+            .to_string()
+            .parse()
+            .unwrap_or_else(|_| f64::from(value))
+    } else {
+        f64::from(value)
+    })
 }
 fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -127,8 +139,9 @@ fn unsupported(name: &str) -> Value {
     Value::String(format!("<unsupported type: {name}>"))
 }
 
-pub(crate) fn pg_columns(row: &PgRow) -> Vec<Column> {
-    row.columns()
+/// Driver column metadata (from a row or a prepared statement) as result columns.
+pub(crate) fn columns<C: sqlx::Column>(columns: &[C]) -> Vec<Column> {
+    columns
         .iter()
         .map(|column| Column {
             name: column.name().to_owned(),
@@ -136,14 +149,11 @@ pub(crate) fn pg_columns(row: &PgRow) -> Vec<Column> {
         })
         .collect()
 }
+pub(crate) fn pg_columns(row: &PgRow) -> Vec<Column> {
+    columns(row.columns())
+}
 pub(crate) fn mysql_columns(row: &MySqlRow) -> Vec<Column> {
-    row.columns()
-        .iter()
-        .map(|column| Column {
-            name: column.name().to_owned(),
-            type_name: column.type_info().name().to_owned(),
-        })
-        .collect()
+    columns(row.columns())
 }
 pub(crate) fn postgres(row: &PgRow) -> Vec<Value> {
     row.columns()
@@ -185,7 +195,7 @@ fn pg_cell(row: &PgRow, index: usize, info: &PgTypeInfo) -> Value {
         "INT2" => get!(i16, |v| signed(i64::from(v))),
         "INT4" => get!(i32, |v| signed(i64::from(v))),
         "INT8" => get!(i64, signed),
-        "FLOAT4" => get!(f32, |v| float(f64::from(v))),
+        "FLOAT4" => get!(f32, float32),
         "FLOAT8" => get!(f64, float),
         "NUMERIC" => get!(ExactNumeric, |v: ExactNumeric| Value::String(v.0)),
         "UUID" => get!(uuid::Uuid, |v: uuid::Uuid| Value::String(v.to_string())),
@@ -206,7 +216,7 @@ fn pg_cell(row: &PgRow, index: usize, info: &PgTypeInfo) -> Value {
         "INT2[]" => array!(i16, |v| signed(i64::from(v))),
         "INT4[]" => array!(i32, |v| signed(i64::from(v))),
         "INT8[]" => array!(i64, signed),
-        "FLOAT4[]" => array!(f32, |v| float(f64::from(v))),
+        "FLOAT4[]" => array!(f32, float32),
         "FLOAT8[]" => array!(f64, float),
         "NUMERIC[]" => array!(ExactNumeric, |v: ExactNumeric| Value::String(v.0)),
         "UUID[]" => array!(uuid::Uuid, |v: uuid::Uuid| Value::String(v.to_string())),
@@ -247,7 +257,7 @@ fn mysql_cell(row: &MySqlRow, index: usize, name: &str) -> Value {
         "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "BIGINT" => get!(i64, signed),
         "TINYINT UNSIGNED" | "SMALLINT UNSIGNED" | "MEDIUMINT UNSIGNED" | "INT UNSIGNED"
         | "BIGINT UNSIGNED" | "YEAR" => get!(u64, unsigned),
-        "FLOAT" => get!(f32, |v| float(f64::from(v))),
+        "FLOAT" => get!(f32, float32),
         "DOUBLE" => get!(f64, float),
         // Decimal's wire payload is ASCII in both MySQL protocols; avoid fixed precision types.
         "DECIMAL" => row
@@ -333,18 +343,18 @@ fn numeric(bytes: &[u8]) -> Option<String> {
         result.push('0');
     } else {
         for position in (0..=weight).rev() {
-            if position == weight {
-                result.push_str(&digit(position).to_string());
+            let _ = if position == weight {
+                write!(result, "{}", digit(position))
             } else {
-                result.push_str(&format!("{:04}", digit(position)));
-            }
+                write!(result, "{:04}", digit(position))
+            };
         }
     }
     if scale > 0 {
         result.push('.');
         let start = result.len();
         for position in 1..=scale.div_ceil(4) {
-            result.push_str(&format!("{:04}", digit(-(position as i32))));
+            let _ = write!(result, "{:04}", digit(-(position as i32)));
         }
         result.truncate(start + scale);
     }
@@ -416,6 +426,14 @@ mod tests {
             value.as_str().unwrap().len(),
             7 + 4096usize.div_ceil(3) * 4 + "…(truncated)".len()
         );
+    }
+    #[test]
+    fn float4_keeps_its_shortest_decimal_form() {
+        assert_eq!(float32(0.1), serde_json::json!(0.1));
+        assert_eq!(float32(1.5), serde_json::json!(1.5));
+        assert_eq!(float32(-16_777_216.0), serde_json::json!(-16_777_216.0));
+        assert_eq!(float32(f32::NAN), "NaN");
+        assert_eq!(float32(f32::INFINITY), "inf");
     }
     #[test]
     fn exact_numeric_handles_scale_sign_and_large_magnitudes() {

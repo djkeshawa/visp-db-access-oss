@@ -29,7 +29,7 @@ pub(crate) fn json_bytes(value: &Value) -> usize {
         Value::Null => 4,
         Value::Bool(true) => 4,
         Value::Bool(false) => 5,
-        Value::Number(number) => number.to_string().len(),
+        Value::Number(number) => number_bytes(number),
         Value::String(string) => string_bytes(string),
         Value::Array(values) => values.iter().fold(
             2usize.saturating_add(values.len().saturating_sub(1)),
@@ -43,6 +43,17 @@ pub(crate) fn json_bytes(value: &Value) -> usize {
                     .saturating_add(json_bytes(value))
             },
         ),
+    }
+}
+/// Serialized width of a JSON number; integers are counted without allocating.
+fn number_bytes(number: &serde_json::Number) -> usize {
+    let digits = |value: u64| value.checked_ilog10().map_or(1, |log| log as usize + 1);
+    if let Some(value) = number.as_u64() {
+        digits(value)
+    } else if let Some(value) = number.as_i64() {
+        digits(value.unsigned_abs()).saturating_add(usize::from(value < 0))
+    } else {
+        number.to_string().len()
     }
 }
 fn string_bytes(string: &str) -> usize {
@@ -77,11 +88,21 @@ impl<'a> Results<'a> {
             self.columns = columns;
         }
     }
+    /// True until column metadata is known; lets callers skip building it per row.
+    pub(crate) fn needs_columns(&self) -> bool {
+        self.columns.is_empty()
+    }
     pub(crate) fn full(&self) -> bool {
         self.rows.len() >= self.limits.max_rows || self.truncated
     }
-    pub(crate) fn truncate(&mut self) {
-        self.truncated = true;
+    /// Retains the row built by `row` unless a budget is exhausted; the row is
+    /// only decoded when it can still be kept. Returns whether it was kept.
+    pub(crate) fn offer(&mut self, row: impl FnOnce() -> Vec<Value>) -> bool {
+        if self.full() {
+            self.truncated = true;
+            return false;
+        }
+        self.push(row())
     }
     pub(crate) fn push(&mut self, row: Vec<Value>) -> bool {
         let size = row.iter().fold(
@@ -146,6 +167,49 @@ mod tests {
         let mut result = Results::new(&limits);
         assert!(!result.push(vec![json!("large")]));
         assert!(result.finish(None).rows.is_empty());
+    }
+
+    #[test]
+    fn json_size_of_numbers_matches_serialization() {
+        for value in [
+            json!(0),
+            json!(-1),
+            json!(9),
+            json!(10),
+            json!(-10),
+            json!(i64::MIN),
+            json!(i64::MAX),
+            json!(u64::MAX),
+            json!(1.5),
+            json!(-0.000_1),
+        ] {
+            assert_eq!(
+                json_bytes(&value),
+                serde_json::to_vec(&value).unwrap().len(),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn offer_decodes_rows_only_while_budget_remains() {
+        let limits = crate::ExecLimits {
+            statement_timeout: std::time::Duration::from_secs(1),
+            lock_timeout: std::time::Duration::from_secs(1),
+            max_rows: 1,
+            max_bytes: 100,
+        };
+        let mut result = Results::new(&limits);
+        assert!(result.offer(|| vec![json!(1)]));
+        let decoded = std::cell::Cell::new(false);
+        assert!(!result.offer(|| {
+            decoded.set(true);
+            vec![json!(2)]
+        }));
+        assert!(!decoded.get(), "row decoded after the cap was reached");
+        let result = result.finish(None);
+        assert_eq!(result.rows, vec![vec![json!(1)]]);
+        assert!(result.truncated);
     }
 }
 

@@ -245,16 +245,6 @@ pub(super) async fn sync(
 ) -> Result<Json<Value>, ApiError> {
     gate(&state, &user, ip).await?;
     let id = db::id(&id)?;
-    let cluster: Option<Uuid> =
-        sqlx::query_scalar("SELECT cluster_id FROM discovered_resources WHERE id=$1")
-            .bind(id)
-            .fetch_one(&state.db)
-            .await?;
-    let current = db::cluster(
-        &state.db,
-        cluster.ok_or_else(|| ApiError::conflict("Only imported resources can be synced"))?,
-    )
-    .await?;
     let mut tx = state.db.begin().await?;
     let (payload, status, cluster): (Value, String, Option<Uuid>) = sqlx::query_as(
         "SELECT payload,status,cluster_id FROM discovered_resources WHERE id=$1 FOR UPDATE",
@@ -262,10 +252,15 @@ pub(super) async fn sync(
     .bind(id)
     .fetch_one(&mut *tx)
     .await?;
-    if status != "imported" {
-        return Err(ApiError::conflict("Only imported resources can be synced"));
-    }
-    let cluster = cluster.ok_or_else(|| ApiError::conflict("Imported cluster was deleted"))?;
+    let cluster = cluster
+        .filter(|_| status == "imported")
+        .ok_or_else(|| ApiError::conflict("Only imported resources can be synced"))?;
+    // Read the cluster only after locking the inventory row so the patch is applied
+    // to the current record rather than to a copy loaded before a concurrent edit.
+    let current: db::ClusterRecord = sqlx::query_as("SELECT * FROM clusters WHERE id=$1")
+        .bind(cluster)
+        .fetch_one(&mut *tx)
+        .await?;
     let mut patch = json!({"host":payload.get("host"),"port":payload.get("port"),"replica_host":payload.get("replica_host"),"replica_port":payload.get("replica_port")});
     if let Some(password) = body.password {
         patch
@@ -273,17 +268,12 @@ pub(super) async fn sync(
             .ok_or_else(ApiError::internal)?
             .insert("password".into(), json!(password));
     }
-    if cluster != current.id {
-        return Err(ApiError::conflict(
-            "Imported cluster changed; reload and retry",
-        ));
-    }
     crate::clusters::apply_patch(&state, &mut tx, &user, ip.0, current, patch).await?;
     let updated: db::ClusterRecord = sqlx::query_as("SELECT * FROM clusters WHERE id=$1")
         .bind(cluster)
         .fetch_one(&mut *tx)
         .await?;
-    let remaining = drift::compare(&payload, Some(&json!(updated)), false);
+    let remaining = drift::compare(&payload, Some(&json!(updated)));
     sqlx::query("UPDATE discovered_resources SET drift=$2 WHERE id=$1")
         .bind(id)
         .bind(json!(remaining))

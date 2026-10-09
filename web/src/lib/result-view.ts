@@ -1,6 +1,7 @@
 import type { QueryResult } from '../api/types';
 import { cellText, csvCell } from './utils';
 import { resultCsv, resultJson } from './result-export';
+const collator = new Intl.Collator(undefined, { numeric: true });
 export type RowSort = { column: number; direction: 'asc' | 'desc' } | null;
 /** Filters and sorts only the fetched snapshot; never issues SQL or mutates rows. */
 export function fetchedRows(
@@ -16,20 +17,31 @@ export function fetchedRows(
   );
   if (!sort) return filtered;
   const direction = sort.direction === 'asc' ? 1 : -1;
-  return filtered.sort((a, b) => {
-    const left = a[sort.column],
-      right = b[sort.column];
+  // Text keys are computed once per row, not once per comparison.
+  const keyed = filtered.map((row) => {
+    const value = row[sort.column];
+    return {
+      row,
+      value,
+      text: value == null || typeof value === 'number' ? '' : cellText(value),
+    };
+  });
+  keyed.sort((a, b) => {
+    const left = a.value,
+      right = b.value;
     if (left == null || right == null)
       return direction * (left == null ? (right == null ? 0 : -1) : 1);
     return (
       direction *
       (typeof left === 'number' && typeof right === 'number'
         ? left - right
-        : cellText(left).localeCompare(cellText(right), undefined, {
-            numeric: true,
-          }))
+        : collator.compare(
+            typeof left === 'number' ? String(left) : a.text,
+            typeof right === 'number' ? String(right) : b.text,
+          ))
     );
   });
+  return keyed.map((entry) => entry.row);
 }
 export type CopyFormat = 'csv' | 'tsv' | 'markdown' | 'json';
 /** Exports the visible fetched snapshot, retaining duplicate names and masked values. */

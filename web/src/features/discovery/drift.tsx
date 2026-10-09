@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { TriangleAlert } from 'lucide-react';
 import type { Cluster, DiscoveredResource } from '../../api/types';
 import { params } from '../../api/client';
@@ -140,25 +140,37 @@ export function ClusterDriftBanner({ cluster }: { cluster: Cluster }) {
     user?.org_role === 'admin',
   );
   const [reviewing, setReviewing] = useState<DiscoveredResource | null>(null);
-  const matches =
-    query.data?.pages
-      .flatMap((page) => page.items)
-      .filter(
-        (resource) =>
-          resource.cluster_id === cluster.id && resource.drift.length,
-      ) ?? [];
+  const admin = user?.org_role === 'admin';
+  const { data, hasNextPage, isFetching, isFetchNextPageError, fetchNextPage } =
+    query;
+  const resource = useMemo(
+    () =>
+      data?.pages
+        .flatMap((page) => page.items)
+        .find(
+          (item) => item.cluster_id === cluster.id && item.drift.length > 0,
+        ),
+    [data, cluster.id],
+  );
   // Older imports may not carry an ARN tag; continue through all matching pages.
-  const resource = matches[0];
   useEffect(() => {
     if (
-      user?.org_role === 'admin' &&
+      admin &&
       !resource &&
-      query.hasNextPage &&
-      !query.isFetching
+      hasNextPage &&
+      !isFetching &&
+      !isFetchNextPageError
     )
-      void query.fetchNextPage();
-  }, [user?.org_role, resource, query]);
-  return user?.org_role === 'admin' ? (
+      void fetchNextPage();
+  }, [
+    admin,
+    resource,
+    hasNextPage,
+    isFetching,
+    isFetchNextPageError,
+    fetchNextPage,
+  ]);
+  return admin ? (
     <>
       {query.error && (
         <span className="drift-notice">

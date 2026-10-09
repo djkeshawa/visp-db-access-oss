@@ -19,9 +19,15 @@ export function ClusterDetail() {
   const { id } = useParams();
   const query = useResource<Cluster>(`/clusters/${id}`);
   const [params, setParams] = useSearchParams();
-  const [sql, setSql] = useState<string | undefined>(
-    params.get('sql') ?? undefined,
-  );
+  const paramSql = params.get('sql') ?? undefined;
+  const [sql, setSql] = useState<string | undefined>(paramSql);
+  // Follow `?sql=` changes while mounted; tab changes drop the param, which
+  // must not discard SQL handed over from the schema explorer.
+  const [seenParamSql, setSeenParamSql] = useState(paramSql);
+  if (paramSql !== seenParamSql) {
+    setSeenParamSql(paramSql);
+    if (paramSql !== undefined) setSql(paramSql);
+  }
   if (query.isPending || query.error)
     return (
       <>
@@ -66,7 +72,7 @@ export function ClusterDetail() {
                 initialSql={sql}
               />
             </Suspense>
-          )}{' '}
+          )}
           {tab === 'schema' && (
             <div className="full-schema">
               <SchemaExplorer
@@ -79,12 +85,12 @@ export function ClusterDetail() {
               />
             </div>
           )}
-          {tab === 'health' && <HealthPage cluster={cluster} />}{' '}
-          {tab === 'access' && admin && <ClusterAccess cluster={cluster} />}{' '}
-          {tab === 'policy' && <PolicyPage cluster={cluster} />}{' '}
+          {tab === 'health' && <HealthPage cluster={cluster} />}
+          {tab === 'access' && admin && <ClusterAccess cluster={cluster} />}
+          {tab === 'policy' && <PolicyPage cluster={cluster} />}
           {tab === 'settings' && admin && (
             <ClusterSettings key={cluster.updated_at} cluster={cluster} />
-          )}{' '}
+          )}
           {![
             'console',
             'schema',
@@ -110,7 +116,7 @@ function ClusterAccess({ cluster }: { cluster: Cluster }) {
       {query.isPending ? (
         <Skeleton />
       ) : query.error ? (
-        <ErrorPanel error={query.error} />
+        <ErrorPanel error={query.error} retry={() => void query.refetch()} />
       ) : (
         <GrantsTable items={query.data.items} onAdd={() => setAdding(true)} />
       )}

@@ -5,6 +5,9 @@ import { request, json } from '../../api/client';
 import { loginMessage } from '../../lib/utils';
 import { BrandMark } from '../../components/ui/brand';
 import { Button, Field } from '../../components/ui';
+/** Only same-origin absolute paths are valid post-login targets (no `//host` or `/\\host`). */
+const safeRedirect = (from: string | undefined) =>
+  from && from.startsWith('/') && !/^\/[/\\]/.test(from) ? from : '/overview';
 export function Login() {
   useEffect(() => {
     document.title = 'Sign in — visp';
@@ -27,6 +30,7 @@ export function Login() {
         className="login-card"
         onSubmit={async (event) => {
           event.preventDefault();
+          if (busy) return;
           setBusy(true);
           setError('');
           const data = new FormData(event.currentTarget);
@@ -38,9 +42,7 @@ export function Login() {
             cache.clear();
             cache.setQueryData(['api', '/auth/me'], value);
             const from = (location.state as { from?: string } | null)?.from;
-            navigate(from?.startsWith('/') ? from : '/overview', {
-              replace: true,
-            });
+            navigate(safeRedirect(from), { replace: true });
           } catch (error) {
             setError(loginMessage(error));
           } finally {

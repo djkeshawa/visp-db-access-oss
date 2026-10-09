@@ -167,6 +167,8 @@ kbd {
 }
 .sr-only {
   position: absolute;
+  top: 0;
+  left: 0;
   width: 1px;
   height: 1px;
   padding: 0;
@@ -502,9 +504,6 @@ kbd {
   background: var(--surface);
   border: var(--stroke) dashed var(--border);
   border-radius: var(--radius-panel);
-}
-.empty h3 {
-  color: var(--text);
 }
 .empty p {
   max-width: 440px;
@@ -2909,10 +2908,6 @@ td small {
 .table-wrap {
   position: relative;
 }
-.sr-only {
-  top: 0;
-  left: 0;
-}
 .bulk-review {
   max-height: 40vh;
   overflow: auto;
@@ -3515,13 +3510,6 @@ tbody tr:hover {
     align-items: flex-start;
   }
 }
-.empty-illustration {
-  color: var(--ink);
-  margin-bottom: 4px;
-}
-.empty-illustration .illustration-orbit {
-  opacity: 0.25;
-}
 .my-approvals .empty {
   padding: 20px 12px;
 }
@@ -4054,4 +4042,44 @@ summary:focus-visible,
 }
 .compact-verdict.error-text {
   color: var(--danger);
+}
+.verdict[aria-busy='true'] > :not(.verdict-updating) {
+  opacity: 0.55;
+  transition: opacity 120ms ease;
+}
+.verdict-updating {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+.suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-4) 0;
+  padding-top: var(--space-3);
+  border-top: var(--stroke) solid var(--border);
+  font-size: var(--text-xs);
+}
+.suggestion {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  line-height: 1.6;
+  color: var(--text);
+}
+.suggestion > svg {
+  flex: none;
+  margin-top: 3px;
+  color: var(--warning);
+}
+.suggestion .button {
+  display: flex;
+  width: fit-content;
+  margin-top: var(--space-1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .verdict[aria-busy='true'] > :not(.verdict-updating) {
+    transition: none;
+  }
 }

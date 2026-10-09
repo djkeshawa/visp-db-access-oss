@@ -1,4 +1,10 @@
-import type { Analysis, Issue, Policy, StatementKind } from './types';
+import type {
+  Analysis,
+  Issue,
+  Policy,
+  StatementKind,
+  Suggestion,
+} from './types';
 /** Deliberately conservative demo classifier; the backend AST guard is authoritative. */
 export function analyzeDemo(sql: string, policy: Policy): Analysis {
   const clean = sql
@@ -117,7 +123,39 @@ export function analyzeDemo(sql: string, policy: Policy): Analysis {
       ? 'requires_approval'
       : 'allow';
   const risk = verdict === 'deny' ? 'critical' : write ? 'high' : 'low';
+  const suggestions: Suggestion[] = [];
+  if (verdict !== 'deny') {
+    if (/^select\s+\*/i.test(code))
+      suggestions.push({
+        code: 'select_star',
+        message:
+          'SELECT * reads every column, including wide ones you may not need. List only the columns you use.',
+      });
+    if (/\blike\s+'%/i.test(clean))
+      suggestions.push({
+        code: 'leading_wildcard',
+        message:
+          'A LIKE pattern that starts with % cannot use a normal index and scans every row.',
+      });
+    if (
+      kind === 'select' &&
+      !has_where &&
+      !has_limit &&
+      !/\b(count|sum|avg|min|max)\s*\(/i.test(code) &&
+      policy.max_rows > 100
+    )
+      suggestions.push({
+        code: 'add_limit',
+        message: `This reads the whole table without a filter. The gateway stops at ${policy.max_rows} rows, but a small LIMIT returns a sample faster.`,
+        fix: {
+          label: 'Add LIMIT 100',
+          sql: `${clean.replace(/;\s*$/, '')}\nLIMIT 100`,
+          action: 'replace',
+        },
+      });
+  }
   return {
+    suggestions,
     verdict,
     risk,
     rewritten_sql: verdict === 'deny' ? null : rewritten + ';',

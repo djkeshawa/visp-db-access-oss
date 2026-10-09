@@ -67,7 +67,7 @@ function GeneralSettings() {
       ) : query.error ? (
         <ErrorPanel error={query.error} />
       ) : (
-        <NetworkForm key={query.dataUpdatedAt} original={query.data} />
+        <NetworkForm key={JSON.stringify(query.data)} original={query.data} />
       )}
       <AboutConsole />
     </>

@@ -67,6 +67,11 @@ export function ClusterSettings({ cluster }: { cluster: Cluster }) {
             requirePassword={requirePassword}
           />
         )}
+        {requirePassword && !draft.password && (
+          <p className="muted" role="status">
+            Re-enter the password to save a changed connection endpoint.
+          </p>
+        )}
         <div className="dialog-actions">
           <Button
             type="submit"
@@ -91,7 +96,10 @@ export function ClusterSettings({ cluster }: { cluster: Cluster }) {
       )}
       <Confirm
         open={deleting}
-        onOpenChange={setDeleting}
+        onOpenChange={(open) => {
+          setDeleting(open);
+          if (!open) setConfirmation('');
+        }}
         title="Delete cluster?"
         description={`Type ${cluster.name} to confirm removing this connection.`}
         danger
@@ -107,6 +115,8 @@ export function ClusterSettings({ cluster }: { cluster: Cluster }) {
         <Field label="Cluster name to confirm">
           <input
             value={confirmation}
+            autoComplete="off"
+            spellCheck={false}
             onChange={(e) => setConfirmation(e.target.value)}
           />
         </Field>

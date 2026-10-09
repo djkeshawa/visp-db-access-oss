@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Plus, LayoutGrid, List, Search } from 'lucide-react';
 import { DiscoveredResources } from '../discovery/resources';
@@ -22,6 +23,7 @@ import {
 } from '../../components/ui';
 import { AddCluster } from './forms';
 import { ClusterCollection } from './collection';
+const healthOrder = ['down', 'degraded', 'unknown', 'healthy'];
 export function Clusters() {
   const [params, setParams] = useSearchParams();
   const clusters = useResource<{ items: Cluster[] }>('/clusters'),
@@ -57,30 +59,40 @@ export function Clusters() {
     setView = (value: string) => update('view', value);
   const adding = params.get('add') === 'true',
     setAdding = (value: boolean) => update('add', value ? 'true' : '');
-  const items =
-    clusters.data?.items
-      .filter(
-        (c) =>
-          (!params.get('project_id') ||
-            c.project_id === params.get('project_id')) &&
-          `${c.name} ${c.host} ${Object.values(c.tags).join(' ')}`
-            .toLowerCase()
-            .includes(search.toLowerCase()) &&
-          (environment === 'all' || environment === c.environment) &&
-          (engine === 'all' || engine === c.engine) &&
-          (provider === 'all' || provider === c.provider) &&
-          (health === 'all' || health === c.health.status),
-      )
-      .sort((a, b) =>
-        sort === 'health'
-          ? ['down', 'degraded', 'unknown', 'healthy'].indexOf(
-              a.health.status,
-            ) -
-              ['down', 'degraded', 'unknown', 'healthy'].indexOf(
-                b.health.status,
-              ) || a.name.localeCompare(b.name)
-          : a.name.localeCompare(b.name),
-      ) ?? [];
+  const projectId = params.get('project_id');
+  const items = useMemo(() => {
+    const needle = search.toLowerCase();
+    return (
+      clusters.data?.items
+        .filter(
+          (c) =>
+            (!projectId || c.project_id === projectId) &&
+            `${c.name} ${c.host} ${Object.values(c.tags).join(' ')}`
+              .toLowerCase()
+              .includes(needle) &&
+            (environment === 'all' || environment === c.environment) &&
+            (engine === 'all' || engine === c.engine) &&
+            (provider === 'all' || provider === c.provider) &&
+            (health === 'all' || health === c.health.status),
+        )
+        .sort((a, b) =>
+          sort === 'health'
+            ? healthOrder.indexOf(a.health.status) -
+                healthOrder.indexOf(b.health.status) ||
+              a.name.localeCompare(b.name)
+            : a.name.localeCompare(b.name),
+        ) ?? []
+    );
+  }, [
+    clusters.data,
+    projectId,
+    search,
+    environment,
+    engine,
+    provider,
+    health,
+    sort,
+  ]);
   const filter = (
     value: string,
     onChange: (value: string) => void,
@@ -133,7 +145,7 @@ export function Clusters() {
         onChange={(value) => {
           const next = new URLSearchParams(params);
           next.set('tab', value);
-          setParams(next);
+          setParams(next, { replace: true });
         }}
         items={[
           { value: 'managed', label: 'Connected' },
@@ -169,7 +181,7 @@ export function Clusters() {
                 />
               </div>
               <Picker
-                value={params.get('project_id') ?? 'all'}
+                value={projectId ?? 'all'}
                 onChange={(value) => update('project_id', value)}
                 label="Filter project"
                 options={[
@@ -231,7 +243,10 @@ export function Clusters() {
             ) : clusters.error || projects.error ? (
               <ErrorPanel
                 error={clusters.error ?? projects.error}
-                retry={() => void clusters.refetch()}
+                retry={() => {
+                  void clusters.refetch();
+                  void projects.refetch();
+                }}
               />
             ) : items.length === 0 ? (
               <Empty
@@ -250,7 +265,7 @@ export function Clusters() {
                         'project_id',
                       ])
                         next.delete(key);
-                      setParams(next);
+                      setParams(next, { replace: true });
                     }}
                   >
                     Clear filters
